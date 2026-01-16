@@ -159,9 +159,12 @@ class VideoProcessor:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+        # Write to temp file first (OpenCV doesn't handle audio)
+        temp_video_path = str(output_path) + ".temp_video.mp4"
+
         # Setup output writer
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
 
         frame_idx = 0
         blurs_applied = 0
@@ -197,10 +200,9 @@ class VideoProcessor:
             cap.release()
             out.release()
 
-        # Post-process with ffmpeg for better compression (optional)
-        # TODO: Re-enable after testing - takes too long for large videos
-        # self._optimize_output(output_path)
-        logger.info(f"[FFMPEG] Skipping optimization for faster testing")
+        # Finalize: merge processed video with original audio + compress
+        logger.info(f"[VIDEO] Frame processing complete. Finalizing with audio...")
+        self._finalize_with_audio(input_path, temp_video_path, output_path)
 
         return {
             "frames_processed": frame_idx,
@@ -208,10 +210,81 @@ class VideoProcessor:
             "output_path": output_path
         }
 
+    def _finalize_with_audio(
+        self,
+        original_path: str,
+        processed_video_path: str,
+        output_path: str
+    ):
+        """
+        Merge processed video with original audio and compress with H.264.
+
+        Args:
+            original_path: Original video with audio
+            processed_video_path: Processed video (no audio)
+            output_path: Final output path
+        """
+        import subprocess
+        import shutil
+
+        logger.info(f"[FFMPEG] Merging audio and compressing...")
+
+        try:
+            # Check if ffmpeg is available
+            result = subprocess.run(
+                ["ffmpeg", "-version"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                logger.warning("[FFMPEG] ffmpeg not available, using raw output")
+                shutil.move(processed_video_path, output_path)
+                return
+
+            # Merge processed video + original audio with H.264 compression
+            ffmpeg_result = subprocess.run([
+                "ffmpeg", "-y",
+                "-i", processed_video_path,  # Processed video (no audio)
+                "-i", original_path,          # Original video (for audio)
+                "-c:v", "libx264",            # H.264 video codec
+                "-preset", "medium",          # Balance speed/quality
+                "-crf", "23",                 # Quality (18-28, lower=better)
+                "-c:a", "aac",                # AAC audio codec
+                "-b:a", "192k",               # Audio bitrate
+                "-map", "0:v:0",              # Use video from first input
+                "-map", "1:a:0?",             # Use audio from second input (optional)
+                "-movflags", "+faststart",    # Web optimization
+                "-shortest",                  # End when shortest stream ends
+                output_path
+            ], capture_output=True, text=True, timeout=1800)  # 30 min timeout
+
+            if ffmpeg_result.returncode != 0:
+                logger.error(f"[FFMPEG] Failed: {ffmpeg_result.stderr}")
+                # Fallback: just move the processed video
+                shutil.move(processed_video_path, output_path)
+            else:
+                logger.info("[FFMPEG] Video finalized with audio successfully")
+                # Clean up temp file
+                if Path(processed_video_path).exists():
+                    Path(processed_video_path).unlink()
+
+        except subprocess.TimeoutExpired:
+            logger.error("[FFMPEG] Timeout during finalization")
+            shutil.move(processed_video_path, output_path)
+        except FileNotFoundError:
+            logger.warning("[FFMPEG] ffmpeg not found, using raw output")
+            shutil.move(processed_video_path, output_path)
+        except Exception as e:
+            logger.error(f"[FFMPEG] Error: {e}", exc_info=True)
+            if Path(processed_video_path).exists():
+                shutil.move(processed_video_path, output_path)
+
     def _optimize_output(self, video_path: str):
         """
         Optimize output video for better compression.
         Requires ffmpeg to be installed.
+        (Deprecated - use _finalize_with_audio instead)
         """
         import subprocess
         import shutil
