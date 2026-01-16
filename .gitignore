@@ -1,0 +1,50 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+
+# Node
+node_modules/
+dist/
+.npm
+
+# IDE
+.vscode/
+.idea/
+
+# Test data and uploads
+test_data/
+uploads/
+output/
+
+# Large media files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.jpg
+*.jpeg
+*.png
+*.gif
+!frontend/public/**
+
+# Models
+models/
+*.pt
+*.pth
+*.onnx
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+*.egg-info/
+build/
