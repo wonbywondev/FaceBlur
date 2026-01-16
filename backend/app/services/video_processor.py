@@ -7,6 +7,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# MediaPipe face mesh contour indices for face outline
+# These indices form the outer boundary of the face
+FACE_OVAL_INDICES = [
+    10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+    397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+    172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
+]
+
 
 class BlurType(str, Enum):
     GAUSSIAN = "gaussian"
@@ -15,15 +23,118 @@ class BlurType(str, Enum):
 
 
 class VideoProcessor:
-    def __init__(self):
-        pass
+    def __init__(self, use_segmentation: bool = True):
+        self.use_segmentation = use_segmentation
+        self._face_mesh = None
+
+    def _get_face_mesh(self):
+        """Lazy load MediaPipe Face Mesh."""
+        if self._face_mesh is None:
+            try:
+                import mediapipe as mp
+                self._face_mesh = mp.solutions.face_mesh.FaceMesh(
+                    static_image_mode=False,
+                    max_num_faces=10,
+                    refine_landmarks=True,
+                    min_detection_confidence=0.3,
+                    min_tracking_confidence=0.3
+                )
+                logger.info("[SEGMENTATION] MediaPipe Face Mesh loaded")
+            except ImportError:
+                logger.warning("[SEGMENTATION] MediaPipe not available, using bbox fallback")
+                self.use_segmentation = False
+        return self._face_mesh
+
+    def _get_face_contour_mask(
+        self,
+        frame: np.ndarray,
+        bbox: List[int]
+    ) -> Optional[np.ndarray]:
+        """
+        Get face contour mask using MediaPipe Face Mesh.
+
+        Args:
+            frame: Input frame (BGR)
+            bbox: Face bounding box [x1, y1, x2, y2]
+
+        Returns:
+            Binary mask of face contour, or None if detection failed
+        """
+        if not self.use_segmentation:
+            return None
+
+        face_mesh = self._get_face_mesh()
+        if face_mesh is None:
+            return None
+
+        x1, y1, x2, y2 = bbox
+        h, w = frame.shape[:2]
+
+        # Expand bbox for better face mesh detection
+        pad_w = int((x2 - x1) * 0.3)
+        pad_h = int((y2 - y1) * 0.3)
+        ex1 = max(0, x1 - pad_w)
+        ey1 = max(0, y1 - pad_h)
+        ex2 = min(w, x2 + pad_w)
+        ey2 = min(h, y2 + pad_h)
+
+        # Extract ROI and convert to RGB
+        roi = frame[ey1:ey2, ex1:ex2]
+        if roi.size == 0:
+            return None
+
+        roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(roi_rgb)
+
+        if not results.multi_face_landmarks:
+            return None
+
+        # Find the face closest to center of bbox
+        roi_h, roi_w = roi.shape[:2]
+        bbox_center = ((x1 + x2) / 2 - ex1, (y1 + y2) / 2 - ey1)
+
+        best_landmarks = None
+        min_dist = float('inf')
+
+        for face_landmarks in results.multi_face_landmarks:
+            # Calculate face center from landmarks
+            nose_tip = face_landmarks.landmark[1]
+            face_center = (nose_tip.x * roi_w, nose_tip.y * roi_h)
+            dist = ((face_center[0] - bbox_center[0])**2 +
+                    (face_center[1] - bbox_center[1])**2)
+            if dist < min_dist:
+                min_dist = dist
+                best_landmarks = face_landmarks
+
+        if best_landmarks is None:
+            return None
+
+        # Extract face oval points
+        points = []
+        for idx in FACE_OVAL_INDICES:
+            lm = best_landmarks.landmark[idx]
+            px = int(lm.x * roi_w) + ex1
+            py = int(lm.y * roi_h) + ey1
+            points.append([px, py])
+
+        # Create mask from convex hull
+        mask = np.zeros((h, w), dtype=np.uint8)
+        points_array = np.array(points, dtype=np.int32)
+        hull = cv2.convexHull(points_array)
+        cv2.fillConvexPoly(mask, hull, 255)
+
+        # Smooth the mask edges
+        mask = cv2.GaussianBlur(mask, (15, 15), 0)
+
+        return mask
 
     def apply_blur(
         self,
         frame: np.ndarray,
         bbox: List[int],
         blur_type: BlurType,
-        intensity: int = 25
+        intensity: int = 25,
+        mask: Optional[np.ndarray] = None
     ) -> np.ndarray:
         """
         Apply blur effect to a region of the frame.
@@ -33,6 +144,7 @@ class VideoProcessor:
             bbox: Bounding box [x1, y1, x2, y2]
             blur_type: Type of blur to apply
             intensity: Blur intensity (1-50)
+            mask: Optional face contour mask for precise blur
 
         Returns:
             Frame with blur applied
@@ -46,27 +158,30 @@ class VideoProcessor:
         x2 = max(x1 + 1, min(x2, w))
         y2 = max(y1 + 1, min(y2, h))
 
+        # Try to get face contour mask if segmentation is enabled
+        if mask is None and self.use_segmentation:
+            mask = self._get_face_contour_mask(frame, bbox)
+
+        # If we have a mask, use it for precise blur
+        if mask is not None:
+            return self._apply_blur_with_mask(frame, mask, blur_type, intensity)
+
+        # Fallback to rectangular blur
         roi = frame[y1:y2, x1:x2]
 
         if roi.size == 0:
             return frame
 
         if blur_type == BlurType.GAUSSIAN:
-            # Kernel size must be odd
             kernel_size = intensity * 2 + 1
             blurred_roi = cv2.GaussianBlur(roi, (kernel_size, kernel_size), 0)
 
         elif blur_type == BlurType.MOSAIC:
-            # Mosaic: downscale then upscale
             roi_h, roi_w = roi.shape[:2]
             scale = max(1, intensity // 3)
-
-            # Downscale
             small_w = max(1, roi_w // scale)
             small_h = max(1, roi_h // scale)
             small = cv2.resize(roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
-
-            # Upscale with nearest neighbor for pixelated effect
             blurred_roi = cv2.resize(small, (roi_w, roi_h), interpolation=cv2.INTER_NEAREST)
 
         elif blur_type == BlurType.BLACKOUT:
@@ -77,6 +192,52 @@ class VideoProcessor:
 
         frame[y1:y2, x1:x2] = blurred_roi
         return frame
+
+    def _apply_blur_with_mask(
+        self,
+        frame: np.ndarray,
+        mask: np.ndarray,
+        blur_type: BlurType,
+        intensity: int
+    ) -> np.ndarray:
+        """
+        Apply blur using a face contour mask for precise edges.
+
+        Args:
+            frame: Input frame (BGR)
+            mask: Binary mask (255 = blur area)
+            blur_type: Type of blur
+            intensity: Blur intensity
+
+        Returns:
+            Frame with masked blur applied
+        """
+        # Create blurred version of entire frame
+        if blur_type == BlurType.GAUSSIAN:
+            kernel_size = intensity * 2 + 1
+            blurred = cv2.GaussianBlur(frame, (kernel_size, kernel_size), 0)
+
+        elif blur_type == BlurType.MOSAIC:
+            h, w = frame.shape[:2]
+            scale = max(1, intensity // 3)
+            small_w = max(1, w // scale)
+            small_h = max(1, h // scale)
+            small = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+            blurred = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        elif blur_type == BlurType.BLACKOUT:
+            blurred = np.zeros_like(frame)
+
+        else:
+            return frame
+
+        # Normalize mask to 0-1 range for blending
+        mask_normalized = mask.astype(np.float32) / 255.0
+        mask_3ch = np.stack([mask_normalized] * 3, axis=-1)
+
+        # Blend original and blurred using mask
+        result = (frame * (1 - mask_3ch) + blurred * mask_3ch).astype(np.uint8)
+        return result
 
     def interpolate_bbox(
         self,
