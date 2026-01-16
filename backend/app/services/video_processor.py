@@ -33,15 +33,18 @@ class VideoProcessor:
             try:
                 import mediapipe as mp
                 self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-                    static_image_mode=False,
+                    static_image_mode=True,  # Better for individual frames
                     max_num_faces=10,
                     refine_landmarks=True,
-                    min_detection_confidence=0.3,
-                    min_tracking_confidence=0.3
+                    min_detection_confidence=0.1,  # Very low for aggressive detection
+                    min_tracking_confidence=0.1
                 )
-                logger.info("[SEGMENTATION] MediaPipe Face Mesh loaded")
-            except ImportError:
-                logger.warning("[SEGMENTATION] MediaPipe not available, using bbox fallback")
+                logger.info("[SEGMENTATION] MediaPipe Face Mesh loaded with confidence=0.1")
+            except ImportError as e:
+                logger.warning(f"[SEGMENTATION] MediaPipe not available: {e}, using bbox fallback")
+                self.use_segmentation = False
+            except Exception as e:
+                logger.error(f"[SEGMENTATION] Error loading MediaPipe: {e}", exc_info=True)
                 self.use_segmentation = False
         return self._face_mesh
 
@@ -61,18 +64,20 @@ class VideoProcessor:
             Binary mask of face contour, or None if detection failed
         """
         if not self.use_segmentation:
+            logger.debug("[SEGMENTATION] Segmentation disabled")
             return None
 
         face_mesh = self._get_face_mesh()
         if face_mesh is None:
+            logger.debug("[SEGMENTATION] Face mesh not available")
             return None
 
         x1, y1, x2, y2 = bbox
         h, w = frame.shape[:2]
 
         # Expand bbox for better face mesh detection
-        pad_w = int((x2 - x1) * 0.3)
-        pad_h = int((y2 - y1) * 0.3)
+        pad_w = int((x2 - x1) * 0.5)  # More padding for better detection
+        pad_h = int((y2 - y1) * 0.5)
         ex1 = max(0, x1 - pad_w)
         ey1 = max(0, y1 - pad_h)
         ex2 = min(w, x2 + pad_w)
@@ -81,13 +86,17 @@ class VideoProcessor:
         # Extract ROI and convert to RGB
         roi = frame[ey1:ey2, ex1:ex2]
         if roi.size == 0:
+            logger.debug("[SEGMENTATION] ROI is empty")
             return None
 
         roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
         results = face_mesh.process(roi_rgb)
 
         if not results.multi_face_landmarks:
+            logger.debug(f"[SEGMENTATION] No face landmarks found in ROI {roi.shape}")
             return None
+
+        logger.debug(f"[SEGMENTATION] Found {len(results.multi_face_landmarks)} face(s) in ROI")
 
         # Find the face closest to center of bbox
         roi_h, roi_w = roi.shape[:2]
@@ -161,12 +170,17 @@ class VideoProcessor:
         # Try to get face contour mask if segmentation is enabled
         if mask is None and self.use_segmentation:
             mask = self._get_face_contour_mask(frame, bbox)
+            if mask is not None:
+                logger.info(f"[BLUR] Using face contour mask for bbox {bbox}")
+            else:
+                logger.debug(f"[BLUR] Segmentation failed, using rectangle for bbox {bbox}")
 
         # If we have a mask, use it for precise blur
         if mask is not None:
             return self._apply_blur_with_mask(frame, mask, blur_type, intensity)
 
         # Fallback to rectangular blur
+        logger.debug(f"[BLUR] Applying rectangular blur for bbox {bbox}")
         roi = frame[y1:y2, x1:x2]
 
         if roi.size == 0:
