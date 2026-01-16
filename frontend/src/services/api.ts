@@ -50,13 +50,16 @@ export const uploadReference = async (
 
 export const startAnalysis = async (
   videoId: string,
-  referenceId: string
+  referenceId?: string
 ): Promise<{ analysis_id: string; estimated_time: number }> => {
-  const response = await api.post('/analyze', {
+  const payload: { video_id: string; reference_id?: string } = {
     video_id: videoId,
-    reference_id: referenceId,
-  });
+  };
+  if (referenceId) {
+    payload.reference_id = referenceId;
+  }
 
+  const response = await api.post('/analyze', payload);
   return response.data;
 };
 

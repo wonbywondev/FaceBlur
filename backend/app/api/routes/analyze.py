@@ -137,10 +137,14 @@ def run_analysis(analysis_id: str, session_id: str):
                     )
                     for app in merged_appearances
                 ],
+                appearance_count=len(cluster["appearances"]),  # Raw detection count
                 similarity_to_reference=cluster.get("similarity_to_reference", 0),
                 is_reference=is_ref,
                 blur_enabled=not is_ref  # Blur everyone except reference by default
             ))
+
+        # Sort faces by appearance count (most frequent first)
+        detected_faces.sort(key=lambda f: f.appearance_count, reverse=True)
 
         # Store result
         analyses[analysis_id]["progress"] = 100

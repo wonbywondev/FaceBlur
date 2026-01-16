@@ -32,6 +32,7 @@ export interface DetectedFace {
   thumbnail: string;
   first_appearance: number;
   appearances: FaceAppearance[];
+  appearance_count: number;  // Total appearances in video
   similarity_to_reference: number;
   is_reference: boolean;
   blur_enabled: boolean;
@@ -64,4 +65,4 @@ export interface ProcessProgress {
   error?: string | null;
 }
 
-export type AppStep = 'upload' | 'reference' | 'analyzing' | 'select' | 'processing' | 'complete';
+export type AppStep = 'upload' | 'confirm' | 'analyzing' | 'select' | 'processing' | 'complete';

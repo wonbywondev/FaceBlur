@@ -1,15 +1,15 @@
 import { useState, useEffect } from 'react';
 import {
   Video,
-  Image,
   Scan,
   Check,
   Download,
   ArrowRight,
-  ArrowLeft,
   Loader2,
   AlertCircle,
   RefreshCw,
+  Play,
+  X,
 } from 'lucide-react';
 
 import { UploadZone } from './components/UploadZone';
@@ -66,7 +66,7 @@ function App() {
           setStep('select');
         } else if (status.status === 'failed') {
           setError('분석 중 오류가 발생했습니다.');
-          setStep('reference');
+          setStep('upload');
         }
       } catch (err) {
         console.error('Error polling analysis status:', err);
@@ -122,7 +122,7 @@ function App() {
     try {
       const result = await api.uploadVideo(files[0]);
       setVideoData(result);
-      setStep('reference');
+      setStep('confirm');  // Go to confirmation step
     } catch (err: any) {
       setError(err.response?.data?.detail || '영상 업로드에 실패했습니다.');
     } finally {
@@ -130,35 +130,24 @@ function App() {
     }
   };
 
-  const handleReferenceUpload = async (files: File[]) => {
-    if (!videoData || files.length === 0) return;
-
-    setIsUploading(true);
-    setError(null);
-
-    try {
-      const result = await api.uploadReference(videoData.video_id, files);
-      setReferenceData(result);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || '참조 이미지 업로드에 실패했습니다.');
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  const handleStartAnalysis = async () => {
-    if (!videoData || !referenceData) return;
+  const handleConfirmAnalysis = async () => {
+    if (!videoData) return;
 
     setError(null);
     setStep('analyzing');
 
     try {
-      const result = await api.startAnalysis(videoData.video_id, referenceData.reference_id);
+      // Start analysis without reference image
+      const result = await api.startAnalysis(videoData.video_id);
       setAnalysisId(result.analysis_id);
     } catch (err: any) {
       setError(err.response?.data?.detail || '분석 시작에 실패했습니다.');
-      setStep('reference');
+      setStep('upload');
     }
+  };
+
+  const handleCancelConfirm = () => {
+    reset();
   };
 
   const handleStartProcessing = async () => {
@@ -211,7 +200,7 @@ function App() {
 
   const steps = [
     { id: 'upload', label: '영상 업로드', icon: Video },
-    { id: 'reference', label: '본인 사진', icon: Image },
+    { id: 'confirm', label: '확인', icon: Play },
     { id: 'analyzing', label: '분석 중', icon: Scan },
     { id: 'select', label: '얼굴 선택', icon: Check },
     { id: 'processing', label: '처리 중', icon: Loader2 },
@@ -320,57 +309,69 @@ function App() {
           </div>
         )}
 
-        {/* Step: Reference */}
-        {step === 'reference' && (
+        {/* Step: Confirm */}
+        {step === 'confirm' && videoData && (
           <div className="space-y-6">
-            <div className="text-center mb-8">
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-white">본인 사진 업로드</h2>
-              <p className="text-gray-500 dark:text-gray-400 mt-2">
-                블러 처리에서 제외할 본인 사진을 업로드하세요
-              </p>
+            <div className="max-w-lg mx-auto">
+              <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl overflow-hidden">
+                {/* Header */}
+                <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-xl font-bold text-gray-900 dark:text-white">
+                      이 영상으로 진행할까요?
+                    </h2>
+                    <button
+                      onClick={handleCancelConfirm}
+                      className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Video Info */}
+                <div className="p-6">
+                  <div className="flex items-start gap-4">
+                    <div className="w-16 h-16 bg-primary-100 dark:bg-primary-900/30 rounded-xl flex items-center justify-center flex-shrink-0">
+                      <Video className="w-8 h-8 text-primary-500" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-gray-900 dark:text-white truncate">
+                        {videoData.filename}
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-3 text-sm text-gray-500 dark:text-gray-400">
+                        <span>⏱️ {Math.round(videoData.duration)}초</span>
+                        <span>📐 {videoData.resolution.width}x{videoData.resolution.height}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
+                    <p className="text-sm text-blue-700 dark:text-blue-300">
+                      💡 AI가 영상을 분석하여 등장하는 모든 얼굴을 자동으로 감지합니다.
+                      분석 완료 후 블러 처리할 얼굴을 선택할 수 있습니다.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="p-6 bg-gray-50 dark:bg-gray-900/50 flex gap-3">
+                  <button
+                    onClick={handleCancelConfirm}
+                    className="flex-1 px-4 py-3 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-xl font-medium hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                  >
+                    취소
+                  </button>
+                  <button
+                    onClick={handleConfirmAnalysis}
+                    className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-xl font-medium transition-colors"
+                  >
+                    분석 시작
+                    <ArrowRight className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
             </div>
-
-            {videoData && (
-              <div className="p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl mb-6">
-                <div className="flex items-center gap-3">
-                  <Check className="w-5 h-5 text-green-500" />
-                  <div>
-                    <p className="font-medium text-green-700 dark:text-green-300">영상 업로드 완료</p>
-                    <p className="text-sm text-green-600 dark:text-green-400">
-                      {videoData.filename} ({Math.round(videoData.duration)}초, {videoData.resolution.width}x{videoData.resolution.height})
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <UploadZone type="reference" onUpload={handleReferenceUpload} isUploading={isUploading} error={null} />
-
-            {referenceData && (
-              <div className="p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl">
-                <div className="flex items-center gap-3">
-                  <Check className="w-5 h-5 text-green-500" />
-                  <div>
-                    <p className="font-medium text-green-700 dark:text-green-300">참조 이미지 업로드 완료</p>
-                    <p className="text-sm text-green-600 dark:text-green-400">
-                      {referenceData.face_count}개 얼굴 임베딩 생성됨
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {referenceData && (
-              <div className="flex justify-end">
-                <button
-                  onClick={handleStartAnalysis}
-                  className="flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-xl font-medium transition-colors"
-                >
-                  분석 시작
-                  <ArrowRight className="w-5 h-5" />
-                </button>
-              </div>
-            )}
           </div>
         )}
 
@@ -431,15 +432,7 @@ function App() {
               />
             </div>
 
-            <div className="flex justify-between">
-              <button
-                onClick={() => setStep('reference')}
-                className="flex items-center gap-2 px-6 py-3 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-xl font-medium hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-              >
-                <ArrowLeft className="w-5 h-5" />
-                이전
-              </button>
-
+            <div className="flex justify-end">
               <button
                 onClick={handleStartProcessing}
                 className="flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-xl font-medium transition-colors"
