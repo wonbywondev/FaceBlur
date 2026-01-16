@@ -25,8 +25,6 @@ function App() {
     setStep,
     videoData,
     setVideoData,
-    referenceData,
-    setReferenceData,
     analysisId,
     setAnalysisId,
     analysisProgress,
