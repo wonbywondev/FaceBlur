@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Processing
     frame_sample_rate: int = 5  # Process every N frames
-    face_detection_confidence: float = 0.5
+    face_detection_confidence: float = 0.3  # Lower = more aggressive detection
     face_similarity_threshold: float = 0.6
 
     # Data retention
