@@ -140,7 +140,7 @@ class FaceMatcher:
         self,
         appearances: List[Dict],
         gap_threshold: float = 1.0,
-        end_buffer: float = 0.3
+        end_buffer: float = 0.2
     ) -> List[Dict]:
         """
         Merge consecutive appearances into ranges.

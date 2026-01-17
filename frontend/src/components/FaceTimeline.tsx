@@ -1,3 +1,4 @@
+import { useRef, useEffect } from 'react';
 import { User, EyeOff, Eye } from 'lucide-react';
 import type { DetectedFace } from '../types';
 
@@ -8,129 +9,183 @@ interface FaceTimelineProps {
   onToggleFace: (faceId: string) => void;
 }
 
+interface TimeSlot {
+  time: number;
+  faces: Array<{
+    face: DetectedFace;
+    isActive: boolean;
+  }>;
+}
+
 export function FaceTimeline({ faces, videoDuration, selectedFaces, onToggleFace }: FaceTimelineProps) {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Sort faces by first appearance
-  const sortedFaces = [...faces].sort((a, b) => a.first_appearance - b.first_appearance);
+  // Create time slots (every 1 second)
+  const slotInterval = 1; // 1 second intervals
+  const totalSlots = Math.ceil(videoDuration / slotInterval);
 
-  // Generate time markers
-  const markerCount = Math.min(10, Math.ceil(videoDuration / 10));
-  const markers = Array.from({ length: markerCount + 1 }, (_, i) =>
-    (videoDuration / markerCount) * i
-  );
+  // Build time slots with faces active at each time
+  const timeSlots: TimeSlot[] = [];
+  for (let i = 0; i <= totalSlots; i++) {
+    const time = i * slotInterval;
+    const activeFaces: TimeSlot['faces'] = [];
+
+    faces.forEach((face) => {
+      // Check if face is visible at this time
+      const isActive = face.appearances.some(
+        (app) => app.start <= time && time <= app.end
+      );
+      if (isActive) {
+        activeFaces.push({ face, isActive: true });
+      }
+    });
+
+    // Sort by face_id for consistent stacking order
+    activeFaces.sort((a, b) => a.face.face_id.localeCompare(b.face.face_id));
+
+    timeSlots.push({ time, faces: activeFaces });
+  }
+
+  // Auto-scroll to show content
+  useEffect(() => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollLeft = 0;
+    }
+  }, []);
+
+  // Calculate pixel width per slot
+  const slotWidth = 48; // pixels per slot
+  const totalWidth = totalSlots * slotWidth;
 
   return (
     <div className="space-y-4">
-      {/* Time axis */}
-      <div className="relative h-6 ml-20">
-        <div className="absolute inset-x-0 top-3 h-px bg-gray-300 dark:bg-gray-600" />
-        {markers.map((time, idx) => (
-          <div
-            key={idx}
-            className="absolute transform -translate-x-1/2"
-            style={{ left: `${(time / videoDuration) * 100}%` }}
-          >
-            <div className="w-px h-2 bg-gray-400 dark:bg-gray-500" />
-            <span className="text-xs text-gray-500 dark:text-gray-400 mt-1 block whitespace-nowrap">
-              {formatTime(time)}
-            </span>
+      {/* Header with legend */}
+      <div className="flex items-center justify-between">
+        <h4 className="font-medium text-gray-900 dark:text-white">
+          타임라인 뷰
+        </h4>
+        <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-blue-400" />
+            <span>표시</span>
           </div>
-        ))}
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-red-400" />
+            <span>블러</span>
+          </div>
+        </div>
       </div>
 
-      {/* Face rows */}
-      <div className="space-y-2">
-        {sortedFaces.map((face) => {
-          const isBlurEnabled = selectedFaces.get(face.face_id) ?? face.blur_enabled;
+      {/* Scrollable timeline container */}
+      <div
+        ref={scrollContainerRef}
+        className="overflow-x-auto pb-4"
+        style={{ scrollbarWidth: 'thin' }}
+      >
+        <div
+          className="relative"
+          style={{ width: `${Math.max(totalWidth, 800)}px`, minHeight: '200px' }}
+        >
+          {/* Time axis at bottom */}
+          <div className="absolute bottom-0 left-0 right-0 h-8 border-t border-gray-200 dark:border-gray-700">
+            {/* Time markers every 5 seconds */}
+            {Array.from({ length: Math.ceil(videoDuration / 5) + 1 }, (_, i) => i * 5).map(
+              (time) => (
+                <div
+                  key={time}
+                  className="absolute bottom-0 transform -translate-x-1/2"
+                  style={{ left: `${(time / videoDuration) * 100}%` }}
+                >
+                  <div className="w-px h-3 bg-gray-400 dark:bg-gray-500 mb-1" />
+                  <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                    {formatTime(time)}
+                  </span>
+                </div>
+              )
+            )}
+          </div>
 
-          return (
-            <div key={face.face_id} className="flex items-center gap-3">
-              {/* Face thumbnail */}
+          {/* Face towers at each time slot */}
+          <div className="absolute bottom-10 left-0 right-0 flex">
+            {timeSlots.map((slot, slotIndex) => (
               <div
-                onClick={() => onToggleFace(face.face_id)}
-                className={`
-                  w-14 h-14 rounded-lg overflow-hidden cursor-pointer flex-shrink-0
-                  transition-all duration-200 hover:scale-105
-                  ${isBlurEnabled ? 'ring-2 ring-red-500' : 'ring-1 ring-gray-300 dark:ring-gray-600'}
-                `}
+                key={slotIndex}
+                className="flex-shrink-0 flex flex-col-reverse items-center gap-1"
+                style={{ width: `${slotWidth}px` }}
               >
-                {face.thumbnail ? (
-                  <img
-                    src={`data:image/jpeg;base64,${face.thumbnail}`}
-                    alt={`Face ${face.face_id}`}
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center bg-gray-200 dark:bg-gray-700">
-                    <User className="w-6 h-6 text-gray-400" />
-                  </div>
-                )}
-              </div>
-
-              {/* Timeline bar */}
-              <div className="flex-1 relative h-8 bg-gray-100 dark:bg-gray-700 rounded-lg overflow-hidden">
-                {face.appearances.map((app, idx) => {
-                  const startPercent = (app.start / videoDuration) * 100;
-                  const widthPercent = Math.max(0.5, ((app.end - app.start) / videoDuration) * 100);
+                {slot.faces.map(({ face }) => {
+                  const isBlurEnabled = selectedFaces.get(face.face_id) ?? face.blur_enabled;
 
                   return (
                     <div
-                      key={idx}
+                      key={face.face_id}
+                      onClick={() => onToggleFace(face.face_id)}
                       className={`
-                        absolute top-1 bottom-1 rounded
-                        ${isBlurEnabled ? 'bg-red-400' : 'bg-blue-400'}
-                        opacity-80 hover:opacity-100 transition-opacity
+                        w-10 h-10 rounded-lg overflow-hidden cursor-pointer
+                        transition-all duration-150 hover:scale-110 hover:z-10
+                        ${isBlurEnabled
+                          ? 'ring-2 ring-red-500 shadow-red-200'
+                          : 'ring-1 ring-gray-300 dark:ring-gray-600'
+                        }
                       `}
-                      style={{
-                        left: `${startPercent}%`,
-                        width: `${widthPercent}%`,
-                        minWidth: '4px',
-                      }}
-                      title={`${formatTime(app.start)} - ${formatTime(app.end)}`}
-                    />
+                      title={`${face.face_id} - ${formatTime(slot.time)}`}
+                    >
+                      {face.thumbnail ? (
+                        <img
+                          src={`data:image/jpeg;base64,${face.thumbnail}`}
+                          alt={face.face_id}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-gray-200 dark:bg-gray-700">
+                          <User className="w-4 h-4 text-gray-400" />
+                        </div>
+                      )}
+
+                      {/* Small blur indicator */}
+                      <div
+                        className={`
+                          absolute bottom-0 right-0 w-3 h-3 rounded-tl
+                          flex items-center justify-center
+                          ${isBlurEnabled ? 'bg-red-500' : 'bg-gray-400'}
+                        `}
+                      >
+                        {isBlurEnabled ? (
+                          <EyeOff className="w-2 h-2 text-white" />
+                        ) : (
+                          <Eye className="w-2 h-2 text-white" />
+                        )}
+                      </div>
+                    </div>
                   );
                 })}
               </div>
-
-              {/* Blur toggle */}
-              <button
-                onClick={() => onToggleFace(face.face_id)}
-                className={`
-                  w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0
-                  transition-colors
-                  ${isBlurEnabled
-                    ? 'bg-red-500 text-white'
-                    : 'bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300'
-                  }
-                `}
-              >
-                {isBlurEnabled ? (
-                  <EyeOff className="w-4 h-4" />
-                ) : (
-                  <Eye className="w-4 h-4" />
-                )}
-              </button>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Legend */}
-      <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400 pt-2 border-t border-gray-200 dark:border-gray-700">
-        <div className="flex items-center gap-1">
-          <div className="w-3 h-3 rounded bg-blue-400" />
-          <span>표시</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <div className="w-3 h-3 rounded bg-red-400" />
-          <span>블러 처리</span>
+            ))}
+          </div>
         </div>
       </div>
+
+      {/* Summary stats */}
+      <div className="flex items-center gap-6 text-sm text-gray-600 dark:text-gray-400 pt-2 border-t border-gray-200 dark:border-gray-700">
+        <span>총 {faces.length}명 감지</span>
+        <span>영상 길이: {formatTime(videoDuration)}</span>
+        <span>
+          블러 대상: {Array.from(selectedFaces.values()).filter(Boolean).length}명
+        </span>
+      </div>
+
+      {/* Scroll hint */}
+      {totalWidth > 800 && (
+        <p className="text-xs text-gray-400 dark:text-gray-500 text-center">
+          ← 좌우로 스크롤하여 전체 타임라인을 확인하세요 →
+        </p>
+      )}
     </div>
   );
 }
