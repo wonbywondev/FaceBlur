@@ -136,13 +136,19 @@ class FaceMatcher:
 
         return clusters
 
-    def merge_appearances(self, appearances: List[Dict], gap_threshold: float = 1.0) -> List[Dict]:
+    def merge_appearances(
+        self,
+        appearances: List[Dict],
+        gap_threshold: float = 1.0,
+        end_buffer: float = 0.3
+    ) -> List[Dict]:
         """
         Merge consecutive appearances into ranges.
 
         Args:
             appearances: List of individual appearances
             gap_threshold: Maximum gap in seconds to merge
+            end_buffer: Extra time to add after last detection (accounts for sampling gap)
 
         Returns:
             List of merged appearance ranges
@@ -166,7 +172,8 @@ class FaceMatcher:
                 current["end"] = app["timestamp"]
                 current["bbox"] = app["bbox"]  # Use latest bbox
             else:
-                # Start new range
+                # Finalize current range with buffer and start new range
+                current["end"] += end_buffer
                 merged.append(current)
                 current = {
                     "start": app["timestamp"],
@@ -174,5 +181,7 @@ class FaceMatcher:
                     "bbox": app["bbox"]
                 }
 
+        # Add buffer to final range
+        current["end"] += end_buffer
         merged.append(current)
         return merged
