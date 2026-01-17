@@ -5,6 +5,8 @@ from enum import Enum
 from pathlib import Path
 import logging
 
+from .face_parser import get_face_parser
+
 logger = logging.getLogger(__name__)
 
 # MediaPipe face mesh contour indices for face outline
@@ -23,12 +25,22 @@ class BlurType(str, Enum):
 
 
 class VideoProcessor:
-    def __init__(self, use_segmentation: bool = True):
+    def __init__(self, use_segmentation: bool = True, use_bisenet: bool = True):
         self.use_segmentation = use_segmentation
+        self.use_bisenet = use_bisenet
         self._face_mesh = None
+        self._face_parser = None
         self._cached_frame_id = None
         self._cached_landmarks = None
         self._last_blur_used_segmentation = False
+
+        # Initialize BiSeNet face parser
+        if use_bisenet:
+            self._face_parser = get_face_parser()
+            if self._face_parser.is_available():
+                logger.info("[SEGMENTATION] BiSeNet face parser available")
+            else:
+                logger.info("[SEGMENTATION] BiSeNet not available, will use fallback")
 
     def _get_face_mesh(self):
         """Lazy load MediaPipe Face Mesh (if available)."""
@@ -117,8 +129,12 @@ class VideoProcessor:
         frame_id: int = 0
     ) -> Optional[np.ndarray]:
         """
-        Get face contour mask using MediaPipe Face Mesh or elliptical fallback.
-        Processes the FULL FRAME (cached) and finds landmarks overlapping with the bbox.
+        Get face contour mask for precise blur application.
+
+        Priority order:
+        1. BiSeNet face parsing (pixel-level segmentation, most precise)
+        2. MediaPipe Face Mesh (landmark-based convex hull)
+        3. Elliptical mask (geometric approximation)
 
         Args:
             frame: Input frame (BGR)
@@ -131,10 +147,25 @@ class VideoProcessor:
         if not self.use_segmentation:
             return None
 
+        # Priority 1: Try BiSeNet face parsing (most precise)
+        if self.use_bisenet and self._face_parser is not None:
+            bisenet_mask = self._face_parser.parse_face(frame, bbox)
+            if bisenet_mask is not None:
+                # Verify mask has content in the bbox region
+                x1, y1, x2, y2 = bbox
+                roi_mask = bisenet_mask[y1:y2, x1:x2]
+                if roi_mask.sum() > 0:
+                    if frame_id % 100 == 0:
+                        logger.info(f"[SEGMENTATION] Frame {frame_id}: BiSeNet mask applied")
+                    return bisenet_mask
+                else:
+                    logger.debug(f"[SEGMENTATION] Frame {frame_id}: BiSeNet mask empty, trying fallback")
+
+        # Priority 2: Try MediaPipe Face Mesh
         landmarks_result = self._get_frame_landmarks(frame, frame_id)
 
-        # Fallback to ellipse if MediaPipe not available
         if landmarks_result == "ellipse":
+            # MediaPipe not available, use ellipse
             return self._create_ellipse_mask(frame, bbox)
 
         if landmarks_result is None:
