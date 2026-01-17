@@ -26,104 +26,167 @@ class VideoProcessor:
     def __init__(self, use_segmentation: bool = True):
         self.use_segmentation = use_segmentation
         self._face_mesh = None
+        self._cached_frame_id = None
+        self._cached_landmarks = None
+        self._last_blur_used_segmentation = False
 
     def _get_face_mesh(self):
-        """Lazy load MediaPipe Face Mesh."""
+        """Lazy load MediaPipe Face Mesh (if available)."""
         if self._face_mesh is None:
             try:
                 import mediapipe as mp
-                self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-                    static_image_mode=True,  # Better for individual frames
-                    max_num_faces=10,
-                    refine_landmarks=True,
-                    min_detection_confidence=0.1,  # Very low for aggressive detection
-                    min_tracking_confidence=0.1
-                )
-                logger.info("[SEGMENTATION] MediaPipe Face Mesh loaded with confidence=0.1")
+                # Try the solutions API (older MediaPipe versions)
+                if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'face_mesh'):
+                    self._face_mesh = mp.solutions.face_mesh.FaceMesh(
+                        static_image_mode=True,
+                        max_num_faces=10,
+                        refine_landmarks=True,
+                        min_detection_confidence=0.1,
+                        min_tracking_confidence=0.1
+                    )
+                    logger.info("[SEGMENTATION] MediaPipe Face Mesh loaded (solutions API)")
+                else:
+                    # MediaPipe 0.10+ on Python 3.13 doesn't have solutions
+                    # Fall back to elliptical mask
+                    logger.info("[SEGMENTATION] MediaPipe solutions API not available, using elliptical mask")
+                    self._face_mesh = "ellipse"  # Sentinel value
             except ImportError as e:
-                logger.warning(f"[SEGMENTATION] MediaPipe not available: {e}, using bbox fallback")
-                self.use_segmentation = False
+                logger.warning(f"[SEGMENTATION] MediaPipe not available: {e}, using elliptical mask")
+                self._face_mesh = "ellipse"
             except Exception as e:
                 logger.error(f"[SEGMENTATION] Error loading MediaPipe: {e}", exc_info=True)
-                self.use_segmentation = False
+                self._face_mesh = "ellipse"
         return self._face_mesh
+
+    def _get_frame_landmarks(self, frame: np.ndarray, frame_id: int):
+        """
+        Get face landmarks for a frame with caching.
+        MediaPipe processes each frame only once, results reused for all faces.
+        """
+        face_mesh = self._get_face_mesh()
+
+        # If using ellipse mode, no MediaPipe landmarks needed
+        if face_mesh == "ellipse":
+            return "ellipse"
+
+        if self._cached_frame_id == frame_id and self._cached_landmarks is not None:
+            return self._cached_landmarks
+
+        if face_mesh is None:
+            return None
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(frame_rgb)
+
+        self._cached_frame_id = frame_id
+        self._cached_landmarks = results.multi_face_landmarks if results.multi_face_landmarks else None
+        return self._cached_landmarks
+
+    def _create_ellipse_mask(
+        self,
+        frame: np.ndarray,
+        bbox: List[int]
+    ) -> np.ndarray:
+        """
+        Create an elliptical mask for face blur (fallback when MediaPipe unavailable).
+        The ellipse is slightly taller than wide to match typical face shape.
+        """
+        x1, y1, x2, y2 = bbox
+        h, w = frame.shape[:2]
+
+        # Calculate ellipse parameters
+        center_x = int((x1 + x2) / 2)
+        center_y = int((y1 + y2) / 2)
+        # Make ellipse slightly narrower than bbox for natural face shape
+        axis_x = int((x2 - x1) / 2 * 0.9)  # 90% of bbox width
+        axis_y = int((y2 - y1) / 2 * 1.05)  # 105% of bbox height (faces are taller)
+
+        # Create mask
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.ellipse(mask, (center_x, center_y), (axis_x, axis_y), 0, 0, 360, 255, -1)
+
+        # Smooth edges for natural blending
+        mask = cv2.GaussianBlur(mask, (21, 21), 0)
+
+        return mask
 
     def _get_face_contour_mask(
         self,
         frame: np.ndarray,
-        bbox: List[int]
+        bbox: List[int],
+        frame_id: int = 0
     ) -> Optional[np.ndarray]:
         """
-        Get face contour mask using MediaPipe Face Mesh.
+        Get face contour mask using MediaPipe Face Mesh or elliptical fallback.
+        Processes the FULL FRAME (cached) and finds landmarks overlapping with the bbox.
 
         Args:
             frame: Input frame (BGR)
             bbox: Face bounding box [x1, y1, x2, y2]
+            frame_id: Frame index for caching
 
         Returns:
             Binary mask of face contour, or None if detection failed
         """
         if not self.use_segmentation:
-            logger.debug("[SEGMENTATION] Segmentation disabled")
             return None
 
-        face_mesh = self._get_face_mesh()
-        if face_mesh is None:
-            logger.debug("[SEGMENTATION] Face mesh not available")
-            return None
+        landmarks_result = self._get_frame_landmarks(frame, frame_id)
 
+        # Fallback to ellipse if MediaPipe not available
+        if landmarks_result == "ellipse":
+            return self._create_ellipse_mask(frame, bbox)
+
+        if landmarks_result is None:
+            # MediaPipe didn't find any faces, use ellipse fallback
+            return self._create_ellipse_mask(frame, bbox)
+
+        # MediaPipe landmarks available - find matching face
         x1, y1, x2, y2 = bbox
         h, w = frame.shape[:2]
-
-        # Expand bbox for better face mesh detection
-        pad_w = int((x2 - x1) * 0.5)  # More padding for better detection
-        pad_h = int((y2 - y1) * 0.5)
-        ex1 = max(0, x1 - pad_w)
-        ey1 = max(0, y1 - pad_h)
-        ex2 = min(w, x2 + pad_w)
-        ey2 = min(h, y2 + pad_h)
-
-        # Extract ROI and convert to RGB
-        roi = frame[ey1:ey2, ex1:ex2]
-        if roi.size == 0:
-            logger.debug("[SEGMENTATION] ROI is empty")
-            return None
-
-        roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-        results = face_mesh.process(roi_rgb)
-
-        if not results.multi_face_landmarks:
-            logger.debug(f"[SEGMENTATION] No face landmarks found in ROI {roi.shape}")
-            return None
-
-        logger.debug(f"[SEGMENTATION] Found {len(results.multi_face_landmarks)} face(s) in ROI")
-
-        # Find the face closest to center of bbox
-        roi_h, roi_w = roi.shape[:2]
-        bbox_center = ((x1 + x2) / 2 - ex1, (y1 + y2) / 2 - ey1)
+        bbox_cx = (x1 + x2) / 2
+        bbox_cy = (y1 + y2) / 2
 
         best_landmarks = None
         min_dist = float('inf')
 
-        for face_landmarks in results.multi_face_landmarks:
-            # Calculate face center from landmarks
+        for face_landmarks in landmarks_result:
+            # Calculate face center from nose tip landmark
             nose_tip = face_landmarks.landmark[1]
-            face_center = (nose_tip.x * roi_w, nose_tip.y * roi_h)
-            dist = ((face_center[0] - bbox_center[0])**2 +
-                    (face_center[1] - bbox_center[1])**2)
-            if dist < min_dist:
-                min_dist = dist
-                best_landmarks = face_landmarks
+            face_cx = nose_tip.x * w
+            face_cy = nose_tip.y * h
+            dist = ((face_cx - bbox_cx)**2 + (face_cy - bbox_cy)**2)
+
+            # Only consider faces that overlap with the bbox
+            if x1 <= face_cx <= x2 and y1 <= face_cy <= y2:
+                if dist < min_dist:
+                    min_dist = dist
+                    best_landmarks = face_landmarks
 
         if best_landmarks is None:
-            return None
+            # Fallback: use closest face even if not perfectly overlapping
+            for face_landmarks in landmarks_result:
+                nose_tip = face_landmarks.landmark[1]
+                face_cx = nose_tip.x * w
+                face_cy = nose_tip.y * h
+                dist = ((face_cx - bbox_cx)**2 + (face_cy - bbox_cy)**2)
 
-        # Extract face oval points
+                bbox_diag = ((x2 - x1)**2 + (y2 - y1)**2) ** 0.5
+                if dist < (bbox_diag * 2) ** 2:
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_landmarks = face_landmarks
+
+        if best_landmarks is None:
+            # No matching MediaPipe face, use ellipse
+            return self._create_ellipse_mask(frame, bbox)
+
+        # Extract face oval points in full frame coordinates
         points = []
         for idx in FACE_OVAL_INDICES:
             lm = best_landmarks.landmark[idx]
-            px = int(lm.x * roi_w) + ex1
-            py = int(lm.y * roi_h) + ey1
+            px = int(lm.x * w)
+            py = int(lm.y * h)
             points.append([px, py])
 
         # Create mask from convex hull
@@ -132,8 +195,8 @@ class VideoProcessor:
         hull = cv2.convexHull(points_array)
         cv2.fillConvexPoly(mask, hull, 255)
 
-        # Smooth the mask edges
-        mask = cv2.GaussianBlur(mask, (15, 15), 0)
+        # Smooth the mask edges for natural blending
+        mask = cv2.GaussianBlur(mask, (21, 21), 0)
 
         return mask
 
@@ -143,7 +206,8 @@ class VideoProcessor:
         bbox: List[int],
         blur_type: BlurType,
         intensity: int = 25,
-        mask: Optional[np.ndarray] = None
+        mask: Optional[np.ndarray] = None,
+        frame_id: int = 0
     ) -> np.ndarray:
         """
         Apply blur effect to a region of the frame.
@@ -154,6 +218,7 @@ class VideoProcessor:
             blur_type: Type of blur to apply
             intensity: Blur intensity (1-50)
             mask: Optional face contour mask for precise blur
+            frame_id: Frame index for caching MediaPipe results
 
         Returns:
             Frame with blur applied
@@ -168,16 +233,23 @@ class VideoProcessor:
         y2 = max(y1 + 1, min(y2, h))
 
         # Try to get face contour mask if segmentation is enabled
+        used_segmentation = False
         if mask is None and self.use_segmentation:
-            mask = self._get_face_contour_mask(frame, bbox)
+            mask = self._get_face_contour_mask(frame, bbox, frame_id)
             if mask is not None:
-                logger.info(f"[BLUR] Using face contour mask for bbox {bbox}")
-            else:
-                logger.debug(f"[BLUR] Segmentation failed, using rectangle for bbox {bbox}")
+                used_segmentation = True
+                # Logging only at intervals to avoid spam
+                if frame_id % 100 == 0:
+                    logger.info(f"[SEGMENTATION] Frame {frame_id}: contour mask applied")
 
         # If we have a mask, use it for precise blur
         if mask is not None:
-            return self._apply_blur_with_mask(frame, mask, blur_type, intensity)
+            result = self._apply_blur_with_mask(frame, mask, blur_type, intensity)
+            # Store segmentation result for tracking
+            self._last_blur_used_segmentation = True
+            return result
+
+        self._last_blur_used_segmentation = False
 
         # Fallback to rectangular blur
         logger.debug(f"[BLUR] Applying rectangular blur for bbox {bbox}")
@@ -334,6 +406,8 @@ class VideoProcessor:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+        logger.info(f"[VIDEO] Processing {total_frames} frames at {width}x{height}, segmentation={self.use_segmentation}")
+
         # Write to temp file first (OpenCV doesn't handle audio)
         temp_video_path = str(output_path) + ".temp_video.mp4"
 
@@ -343,6 +417,7 @@ class VideoProcessor:
 
         frame_idx = 0
         blurs_applied = 0
+        segmented_blurs = 0
 
         try:
             while cap.isOpened():
@@ -361,8 +436,12 @@ class VideoProcessor:
                     )
 
                     if bbox is not None:
-                        frame = self.apply_blur(frame, bbox, blur_type, intensity)
+                        frame = self.apply_blur(frame, bbox, blur_type, intensity, frame_id=frame_idx)
                         blurs_applied += 1
+
+                        # Track segmentation usage
+                        if getattr(self, '_last_blur_used_segmentation', False):
+                            segmented_blurs += 1
 
                 out.write(frame)
                 frame_idx += 1
@@ -375,13 +454,18 @@ class VideoProcessor:
             cap.release()
             out.release()
 
+        # Log segmentation statistics
+        seg_rate = (segmented_blurs / blurs_applied * 100) if blurs_applied > 0 else 0
+        logger.info(f"[VIDEO] Frame processing complete. Blurs: {blurs_applied}, Segmented: {segmented_blurs} ({seg_rate:.1f}%)")
+
         # Finalize: merge processed video with original audio + compress
-        logger.info(f"[VIDEO] Frame processing complete. Finalizing with audio...")
+        logger.info(f"[VIDEO] Finalizing with audio...")
         self._finalize_with_audio(input_path, temp_video_path, output_path)
 
         return {
             "frames_processed": frame_idx,
             "blurs_applied": blurs_applied,
+            "segmented_blurs": segmented_blurs,
             "output_path": output_path
         }
 
