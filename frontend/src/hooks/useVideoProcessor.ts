@@ -32,7 +32,11 @@ interface VideoProcessorState {
   selectedFaces: Map<string, boolean>;
   toggleFace: (faceId: string) => void;
   setFaceBlur: (faceId: string, enabled: boolean) => void;
-  blurAllExceptReference: () => void;
+  blurAllExceptMyFace: () => void;
+
+  // My face selection (P5)
+  myFaceId: string | null;
+  setMyFaceId: (faceId: string | null) => void;
 
   // Blur settings
   blurType: BlurType;
@@ -62,6 +66,7 @@ const initialState = {
   analysisProgress: 0,
   analysisResult: null,
   selectedFaces: new Map<string, boolean>(),
+  myFaceId: null,
   blurType: 'gaussian' as BlurType,
   blurIntensity: 25,
   processId: null,
@@ -96,7 +101,11 @@ export const useVideoProcessor = create<VideoProcessorState>((set, get) => ({
   },
 
   toggleFace: (faceId) => {
-    const { selectedFaces } = get();
+    const { selectedFaces, myFaceId } = get();
+    // If toggling my face, don't enable blur (skip)
+    if (faceId === myFaceId) {
+      return;
+    }
     const newSelectedFaces = new Map(selectedFaces);
     newSelectedFaces.set(faceId, !selectedFaces.get(faceId));
     set({ selectedFaces: newSelectedFaces });
@@ -109,15 +118,29 @@ export const useVideoProcessor = create<VideoProcessorState>((set, get) => ({
     set({ selectedFaces: newSelectedFaces });
   },
 
-  blurAllExceptReference: () => {
-    const { analysisResult, selectedFaces } = get();
+  blurAllExceptMyFace: () => {
+    const { analysisResult, selectedFaces, myFaceId } = get();
     if (!analysisResult) return;
 
     const newSelectedFaces = new Map(selectedFaces);
     analysisResult.faces.forEach((face) => {
-      newSelectedFaces.set(face.face_id, !face.is_reference);
+      // Don't blur my face, blur all others
+      const isMyFace = face.face_id === myFaceId || face.is_reference;
+      newSelectedFaces.set(face.face_id, !isMyFace);
     });
     set({ selectedFaces: newSelectedFaces });
+  },
+
+  setMyFaceId: (myFaceId) => {
+    const { selectedFaces } = get();
+    // When setting my face, disable blur for that face
+    if (myFaceId) {
+      const newSelectedFaces = new Map(selectedFaces);
+      newSelectedFaces.set(myFaceId, false);
+      set({ myFaceId, selectedFaces: newSelectedFaces });
+    } else {
+      set({ myFaceId });
+    }
   },
 
   setBlurType: (blurType) => set({ blurType }),

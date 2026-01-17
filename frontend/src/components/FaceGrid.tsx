@@ -1,14 +1,23 @@
-import { Check, User, Eye, EyeOff, Star } from 'lucide-react';
+import { Check, User, Eye, EyeOff, Star, UserCheck } from 'lucide-react';
 import type { DetectedFace } from '../types';
 
 interface FaceGridProps {
   faces: DetectedFace[];
   selectedFaces: Map<string, boolean>;
+  myFaceId: string | null;
   onToggleFace: (faceId: string) => void;
   onBlurAll: () => void;
+  onSetMyFace: (faceId: string | null) => void;
 }
 
-export function FaceGrid({ faces, selectedFaces, onToggleFace, onBlurAll }: FaceGridProps) {
+export function FaceGrid({
+  faces,
+  selectedFaces,
+  myFaceId,
+  onToggleFace,
+  onBlurAll,
+  onSetMyFace,
+}: FaceGridProps) {
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
@@ -22,8 +31,18 @@ export function FaceGrid({ faces, selectedFaces, onToggleFace, onBlurAll }: Face
   const topFaces = sortedFaces.slice(0, 5);
   const otherFaces = sortedFaces.slice(5);
 
+  const handleMyFaceClick = (e: React.MouseEvent, faceId: string) => {
+    e.stopPropagation();
+    if (myFaceId === faceId) {
+      onSetMyFace(null);
+    } else {
+      onSetMyFace(faceId);
+    }
+  };
+
   const renderFaceCard = (face: DetectedFace, isTop: boolean = false) => {
     const isBlurEnabled = selectedFaces.get(face.face_id) ?? face.blur_enabled;
+    const isMyFace = myFaceId === face.face_id;
     const appearanceCount = face.appearance_count || face.appearances.length;
 
     return (
@@ -33,9 +52,9 @@ export function FaceGrid({ faces, selectedFaces, onToggleFace, onBlurAll }: Face
         className={`
           relative rounded-xl overflow-hidden cursor-pointer
           transition-all duration-200 transform hover:scale-105
-          ${face.is_reference ? 'ring-2 ring-green-500' : ''}
-          ${isBlurEnabled ? 'ring-2 ring-red-500' : ''}
-          ${isTop ? 'ring-2 ring-yellow-400' : ''}
+          ${isMyFace ? 'ring-2 ring-green-500 ring-offset-2' : ''}
+          ${isBlurEnabled && !isMyFace ? 'ring-2 ring-red-500' : ''}
+          ${isTop && !isMyFace && !isBlurEnabled ? 'ring-2 ring-yellow-400' : ''}
         `}
       >
         {/* Thumbnail */}
@@ -60,17 +79,33 @@ export function FaceGrid({ faces, selectedFaces, onToggleFace, onBlurAll }: Face
               {appearanceCount}회 등장
             </span>
 
-            <div
-              className={`
-                w-6 h-6 rounded-full flex items-center justify-center
-                ${isBlurEnabled ? 'bg-red-500' : 'bg-gray-500'}
-              `}
-            >
-              {isBlurEnabled ? (
-                <EyeOff className="w-3 h-3 text-white" />
-              ) : (
-                <Eye className="w-3 h-3 text-white" />
-              )}
+            <div className="flex items-center gap-1">
+              {/* My face toggle */}
+              <button
+                onClick={(e) => handleMyFaceClick(e, face.face_id)}
+                className={`
+                  w-6 h-6 rounded-full flex items-center justify-center
+                  transition-colors
+                  ${isMyFace ? 'bg-green-500' : 'bg-gray-600 hover:bg-gray-500'}
+                `}
+                title={isMyFace ? '내 얼굴 해제' : '내 얼굴로 지정'}
+              >
+                <UserCheck className="w-3 h-3 text-white" />
+              </button>
+
+              {/* Blur toggle indicator */}
+              <div
+                className={`
+                  w-6 h-6 rounded-full flex items-center justify-center
+                  ${isBlurEnabled ? 'bg-red-500' : 'bg-gray-500'}
+                `}
+              >
+                {isBlurEnabled ? (
+                  <EyeOff className="w-3 h-3 text-white" />
+                ) : (
+                  <Eye className="w-3 h-3 text-white" />
+                )}
+              </div>
             </div>
           </div>
 
@@ -79,8 +114,16 @@ export function FaceGrid({ faces, selectedFaces, onToggleFace, onBlurAll }: Face
           </p>
         </div>
 
+        {/* My Face badge */}
+        {isMyFace && (
+          <div className="absolute top-2 left-2 px-2 py-1 bg-green-500 text-white text-xs font-medium rounded-full flex items-center gap-1">
+            <UserCheck className="w-3 h-3" />
+            내 얼굴
+          </div>
+        )}
+
         {/* Top face badge */}
-        {isTop && (
+        {isTop && !isMyFace && (
           <div className="absolute top-2 left-2 px-2 py-1 bg-yellow-500 text-white text-xs font-medium rounded-full flex items-center gap-1">
             <Star className="w-3 h-3" />
             주요
@@ -88,7 +131,7 @@ export function FaceGrid({ faces, selectedFaces, onToggleFace, onBlurAll }: Face
         )}
 
         {/* Reference badge */}
-        {face.is_reference && (
+        {face.is_reference && !isMyFace && (
           <div className="absolute top-2 left-2 px-2 py-1 bg-green-500 text-white text-xs font-medium rounded-full flex items-center gap-1">
             <Check className="w-3 h-3" />
             본인
@@ -96,7 +139,7 @@ export function FaceGrid({ faces, selectedFaces, onToggleFace, onBlurAll }: Face
         )}
 
         {/* Blur indicator */}
-        {isBlurEnabled && !face.is_reference && (
+        {isBlurEnabled && !isMyFace && (
           <div className="absolute top-2 right-2 px-2 py-1 bg-red-500 text-white text-xs font-medium rounded-full">
             블러
           </div>
@@ -114,18 +157,30 @@ export function FaceGrid({ faces, selectedFaces, onToggleFace, onBlurAll }: Face
             감지된 얼굴 ({faces.length}명)
           </h3>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            블러 처리할 얼굴을 선택하세요
+            블러 처리할 얼굴을 선택하세요. <UserCheck className="w-3 h-3 inline" /> 버튼으로 내 얼굴을 지정할 수 있습니다.
           </p>
         </div>
 
-        <button
-          onClick={onBlurAll}
-          className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors text-sm font-medium"
-        >
-          <EyeOff className="w-4 h-4 inline-block mr-2" />
-          모두 블러
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={onBlurAll}
+            className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors text-sm font-medium"
+          >
+            <EyeOff className="w-4 h-4 inline-block mr-2" />
+            모두 블러
+          </button>
+        </div>
       </div>
+
+      {/* My face info */}
+      {myFaceId && (
+        <div className="p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl">
+          <p className="text-sm text-green-700 dark:text-green-300 flex items-center gap-2">
+            <UserCheck className="w-4 h-4" />
+            내 얼굴이 지정되었습니다. "모두 블러" 클릭 시 내 얼굴을 제외한 모든 얼굴이 블러 처리됩니다.
+          </p>
+        </div>
+      )}
 
       {/* Top 5 Faces Section */}
       {topFaces.length > 0 && (

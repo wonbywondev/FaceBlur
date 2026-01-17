@@ -10,14 +10,19 @@ import {
   RefreshCw,
   Play,
   X,
+  LayoutGrid,
+  Clock,
 } from 'lucide-react';
 
 import { UploadZone } from './components/UploadZone';
 import { FaceGrid } from './components/FaceGrid';
+import { FaceTimeline } from './components/FaceTimeline';
 import { ProgressBar } from './components/ProgressBar';
 import { BlurSettings } from './components/BlurSettings';
 import { useVideoProcessor } from './hooks/useVideoProcessor';
 import * as api from './services/api';
+
+type ViewMode = 'grid' | 'timeline';
 
 function App() {
   const {
@@ -33,7 +38,9 @@ function App() {
     setAnalysisResult,
     selectedFaces,
     toggleFace,
-    blurAllExceptReference,
+    blurAllExceptMyFace,
+    myFaceId,
+    setMyFaceId,
     blurType,
     setBlurType,
     blurIntensity,
@@ -48,6 +55,7 @@ function App() {
   } = useVideoProcessor();
 
   const [isUploading, setIsUploading] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>('grid');
 
   // Poll for analysis progress
   useEffect(() => {
@@ -76,39 +84,25 @@ function App() {
 
   // Poll for processing progress
   useEffect(() => {
-    console.log('[POLLING] useEffect triggered, step:', step, 'processId:', processId);
-
-    if (step !== 'processing' || !processId) {
-      console.log('[POLLING] Skipping - step is not processing or no processId');
-      return;
-    }
-
-    console.log('[POLLING] Starting polling for processId:', processId);
+    if (step !== 'processing' || !processId) return;
 
     const interval = setInterval(async () => {
       try {
-        console.log('[POLLING] Fetching status...');
         const status = await api.getProcessStatus(processId);
-        console.log('[POLLING] Status received:', status);
         setProcessProgress(status.progress);
 
         if (status.status === 'completed') {
-          console.log('[POLLING] Processing completed!');
           setStep('complete');
         } else if (status.status === 'failed') {
-          console.log('[POLLING] Processing failed:', status.error);
           setError(status.error || '처리 중 오류가 발생했습니다.');
           setStep('select');
         }
       } catch (err) {
-        console.error('[POLLING] Error polling process status:', err);
+        console.error('Error polling process status:', err);
       }
     }, 1000);
 
-    return () => {
-      console.log('[POLLING] Cleaning up interval');
-      clearInterval(interval);
-    };
+    return () => clearInterval(interval);
   }, [step, processId, setProcessProgress, setStep, setError]);
 
   const handleVideoUpload = async (files: File[]) => {
@@ -120,7 +114,7 @@ function App() {
     try {
       const result = await api.uploadVideo(files[0]);
       setVideoData(result);
-      setStep('confirm');  // Go to confirmation step
+      setStep('confirm');
     } catch (err: any) {
       setError(err.response?.data?.detail || '영상 업로드에 실패했습니다.');
     } finally {
@@ -135,7 +129,6 @@ function App() {
     setStep('analyzing');
 
     try {
-      // Start analysis without reference image
       const result = await api.startAnalysis(videoData.video_id);
       setAnalysisId(result.analysis_id);
     } catch (err: any) {
@@ -149,18 +142,11 @@ function App() {
   };
 
   const handleStartProcessing = async () => {
-    console.log('[PROCESS] Starting blur processing...');
-    if (!analysisId) {
-      console.log('[PROCESS] No analysisId, returning');
-      return;
-    }
+    if (!analysisId) return;
 
-    // Get face IDs to blur
     const faceIdsToBlur = Array.from(selectedFaces.entries())
       .filter(([_, enabled]) => enabled)
       .map(([faceId]) => faceId);
-
-    console.log('[PROCESS] Face IDs to blur:', faceIdsToBlur.length);
 
     if (faceIdsToBlur.length === 0) {
       setError('블러 처리할 얼굴을 선택해주세요.');
@@ -169,7 +155,6 @@ function App() {
 
     setError(null);
     setStep('processing');
-    console.log('[PROCESS] Step set to processing, calling API...');
 
     try {
       const result = await api.startBlurProcessing(analysisId, {
@@ -177,15 +162,8 @@ function App() {
         intensity: blurIntensity,
         face_ids: faceIdsToBlur,
       });
-      console.log('[PROCESS] API returned, process_id:', result.process_id);
       setProcessId(result.process_id);
-      console.log('[PROCESS] processId set to:', result.process_id);
     } catch (err: any) {
-      console.error('[PROCESS] API error:', err);
-      console.error('[PROCESS] Error response:', err.response);
-      console.error('[PROCESS] Error status:', err.response?.status);
-      console.error('[PROCESS] Error data:', err.response?.data);
-      console.error('[PROCESS] Error message:', err.message);
       setError(err.response?.data?.detail || err.message || '처리 시작에 실패했습니다.');
       setStep('select');
     }
@@ -312,7 +290,6 @@ function App() {
           <div className="space-y-6">
             <div className="max-w-lg mx-auto">
               <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl overflow-hidden">
-                {/* Header */}
                 <div className="p-6 border-b border-gray-200 dark:border-gray-700">
                   <div className="flex items-center justify-between">
                     <h2 className="text-xl font-bold text-gray-900 dark:text-white">
@@ -327,7 +304,6 @@ function App() {
                   </div>
                 </div>
 
-                {/* Video Info */}
                 <div className="p-6">
                   <div className="flex items-start gap-4">
                     <div className="w-16 h-16 bg-primary-100 dark:bg-primary-900/30 rounded-xl flex items-center justify-center flex-shrink-0">
@@ -352,7 +328,6 @@ function App() {
                   </div>
                 </div>
 
-                {/* Actions */}
                 <div className="p-6 bg-gray-50 dark:bg-gray-900/50 flex gap-3">
                   <button
                     onClick={handleCancelConfirm}
@@ -411,13 +386,56 @@ function App() {
               </p>
             </div>
 
+            {/* View mode toggle */}
+            <div className="flex justify-end mb-4">
+              <div className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 p-1">
+                <button
+                  onClick={() => setViewMode('grid')}
+                  className={`
+                    px-3 py-1.5 rounded-md text-sm font-medium flex items-center gap-1.5
+                    ${viewMode === 'grid'
+                      ? 'bg-primary-500 text-white'
+                      : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                    }
+                  `}
+                >
+                  <LayoutGrid className="w-4 h-4" />
+                  그리드
+                </button>
+                <button
+                  onClick={() => setViewMode('timeline')}
+                  className={`
+                    px-3 py-1.5 rounded-md text-sm font-medium flex items-center gap-1.5
+                    ${viewMode === 'timeline'
+                      ? 'bg-primary-500 text-white'
+                      : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                    }
+                  `}
+                >
+                  <Clock className="w-4 h-4" />
+                  타임라인
+                </button>
+              </div>
+            </div>
+
             <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-lg">
-              <FaceGrid
-                faces={analysisResult.faces}
-                selectedFaces={selectedFaces}
-                onToggleFace={toggleFace}
-                onBlurAll={blurAllExceptReference}
-              />
+              {viewMode === 'grid' ? (
+                <FaceGrid
+                  faces={analysisResult.faces}
+                  selectedFaces={selectedFaces}
+                  myFaceId={myFaceId}
+                  onToggleFace={toggleFace}
+                  onBlurAll={blurAllExceptMyFace}
+                  onSetMyFace={setMyFaceId}
+                />
+              ) : (
+                <FaceTimeline
+                  faces={analysisResult.faces}
+                  videoDuration={videoData?.duration || 60}
+                  selectedFaces={selectedFaces}
+                  onToggleFace={toggleFace}
+                />
+              )}
             </div>
 
             <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-lg">
