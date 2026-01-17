@@ -532,22 +532,48 @@ class VideoProcessor:
                 shutil.move(processed_video_path, output_path)
                 return
 
-            # Merge processed video + original audio with H.264 compression
-            ffmpeg_result = subprocess.run([
-                "ffmpeg", "-y",
-                "-i", processed_video_path,  # Processed video (no audio)
-                "-i", original_path,          # Original video (for audio)
-                "-c:v", "libx264",            # H.264 video codec
-                "-preset", "slow",            # Better compression (slower encode)
-                "-crf", "26",                 # Quality (18-28, higher=smaller file)
-                "-c:a", "aac",                # AAC audio codec
-                "-b:a", "128k",               # Audio bitrate (128k is sufficient)
-                "-map", "0:v:0",              # Use video from first input
-                "-map", "1:a:0?",             # Use audio from second input (optional)
-                "-movflags", "+faststart",    # Web optimization
-                "-shortest",                  # End when shortest stream ends
-                output_path
-            ], capture_output=True, text=True, timeout=1800)  # 30 min timeout
+            # Check for hardware acceleration (macOS VideoToolbox)
+            import platform
+            use_hw_accel = platform.system() == "Darwin"
+
+            if use_hw_accel:
+                # Use VideoToolbox for hardware-accelerated encoding on macOS
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", processed_video_path,
+                    "-i", original_path,
+                    "-c:v", "h264_videotoolbox",  # Hardware accelerated H.264
+                    "-q:v", "65",                  # Quality (1-100, higher=better)
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-map", "0:v:0",
+                    "-map", "1:a:0?",
+                    "-movflags", "+faststart",
+                    "-shortest",
+                    output_path
+                ]
+            else:
+                # Software encoding with fast preset
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", processed_video_path,
+                    "-i", original_path,
+                    "-c:v", "libx264",
+                    "-preset", "fast",              # Faster encoding
+                    "-crf", "26",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-map", "0:v:0",
+                    "-map", "1:a:0?",
+                    "-movflags", "+faststart",
+                    "-shortest",
+                    output_path
+                ]
+
+            ffmpeg_result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True, text=True, timeout=1800
+            )
 
             if ffmpeg_result.returncode != 0:
                 logger.error(f"[FFMPEG] Failed: {ffmpeg_result.stderr}")

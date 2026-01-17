@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     allowed_image_extensions: set = {".jpg", ".jpeg", ".png"}
 
     # Processing
-    frame_sample_rate: int = 5  # Process every N frames
+    frame_sample_rate: int = 10  # Process every N frames (10 = ~3fps for 30fps video)
     face_detection_confidence: float = 0.1  # Very low = aggressive detection
     face_similarity_threshold: float = 0.6
 

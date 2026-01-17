@@ -119,39 +119,41 @@ class FaceDetector:
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_count = 0
+
+        # Calculate which frames to process
+        frames_to_process = list(range(0, total_frames, sample_rate))
+        total_to_process = len(frames_to_process)
 
         try:
             # Initial progress update
             if progress_callback:
                 progress_callback(0, 0)
 
-            while cap.isOpened():
+            for idx, frame_number in enumerate(frames_to_process):
+                # Seek to the target frame (faster than reading all frames)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
                 ret, frame = cap.read()
                 if not ret:
-                    break
+                    continue
 
-                if frame_count % sample_rate == 0:
-                    timestamp = frame_count / fps
-                    faces = self.detect_faces(frame)
+                timestamp = frame_number / fps
+                faces = self.detect_faces(frame)
 
-                    yield {
-                        "frame_number": frame_count,
-                        "timestamp": timestamp,
-                        "faces": faces,
-                        "frame": frame
-                    }
+                yield {
+                    "frame_number": frame_number,
+                    "timestamp": timestamp,
+                    "faces": faces,
+                    "frame": frame
+                }
 
-                    # Update progress more frequently (every processed frame)
-                    if progress_callback:
-                        progress = (frame_count / total_frames) * 100
-                        progress_callback(progress, frame_count)
-
-                frame_count += 1
+                # Update progress based on frames processed
+                if progress_callback:
+                    progress = ((idx + 1) / total_to_process) * 100
+                    progress_callback(progress, frame_number)
 
             # Final progress update
             if progress_callback:
-                progress_callback(100, frame_count)
+                progress_callback(100, total_frames)
 
         finally:
             cap.release()
