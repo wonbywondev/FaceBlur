@@ -1,6 +1,6 @@
 export type BlurType = 'gaussian' | 'mosaic' | 'blackout';
 
-export type ProcessStatus = 'uploaded' | 'processing' | 'analyzing' | 'completed' | 'failed';
+export type ProcessStatus = 'uploaded' | 'processing' | 'analyzing' | 'paused' | 'completed' | 'stopped' | 'failed';
 
 export interface Resolution {
   width: number;

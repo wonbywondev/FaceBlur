@@ -9,6 +9,8 @@ import {
   AlertCircle,
   RefreshCw,
   Play,
+  Pause,
+  Square,
   X,
   LayoutGrid,
   Clock,
@@ -56,6 +58,7 @@ function App() {
 
   const [isUploading, setIsUploading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [isPaused, setIsPaused] = useState(false);
 
   // Poll for analysis progress
   useEffect(() => {
@@ -92,10 +95,20 @@ function App() {
         setProcessProgress(status.progress);
 
         if (status.status === 'completed') {
+          setIsPaused(false);
           setStep('complete');
         } else if (status.status === 'failed') {
+          setIsPaused(false);
           setError(status.error || '처리 중 오류가 발생했습니다.');
           setStep('select');
+        } else if (status.status === 'stopped') {
+          setIsPaused(false);
+          setError('처리가 중지되었습니다.');
+          setStep('select');
+        } else if (status.status === 'paused') {
+          setIsPaused(true);
+        } else if (status.status === 'processing') {
+          setIsPaused(false);
         }
       } catch (err) {
         console.error('Error polling process status:', err);
@@ -104,6 +117,28 @@ function App() {
 
     return () => clearInterval(interval);
   }, [step, processId, setProcessProgress, setStep, setError]);
+
+  const handlePauseResume = async () => {
+    if (!processId) return;
+    try {
+      if (isPaused) {
+        await api.resumeProcessing(processId);
+      } else {
+        await api.pauseProcessing(processId);
+      }
+    } catch (err) {
+      console.error('Error toggling pause:', err);
+    }
+  };
+
+  const handleStopProcessing = async () => {
+    if (!processId) return;
+    try {
+      await api.stopProcessing(processId);
+    } catch (err) {
+      console.error('Error stopping process:', err);
+    }
+  };
 
   const handleVideoUpload = async (files: File[]) => {
     if (files.length === 0) return;
@@ -433,7 +468,10 @@ function App() {
                   faces={analysisResult.faces}
                   videoDuration={videoData?.duration || 60}
                   selectedFaces={selectedFaces}
+                  myFaceId={myFaceId}
                   onToggleFace={toggleFace}
+                  onBlurAll={blurAllExceptMyFace}
+                  onSetMyFace={setMyFaceId}
                 />
               )}
             </div>
@@ -464,25 +502,75 @@ function App() {
         {step === 'processing' && (
           <div className="space-y-6">
             <div className="text-center mb-8">
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-white">블러 처리 중</h2>
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
+                {isPaused ? '일시 정지됨' : '블러 처리 중'}
+              </h2>
               <p className="text-gray-500 dark:text-gray-400 mt-2">
-                선택한 얼굴에 블러를 적용하고 있습니다
+                {isPaused
+                  ? '처리가 일시 정지되었습니다. 재개하려면 버튼을 클릭하세요.'
+                  : '선택한 얼굴에 블러를 적용하고 있습니다'}
               </p>
             </div>
 
             <div className="max-w-md mx-auto">
               <div className="p-8 bg-white dark:bg-gray-800 rounded-2xl shadow-lg">
                 <div className="flex justify-center mb-6">
-                  <div className="w-16 h-16 bg-primary-100 dark:bg-primary-900/30 rounded-full flex items-center justify-center">
-                    <Loader2 className="w-8 h-8 text-primary-500 animate-spin" />
+                  <div className={`w-16 h-16 rounded-full flex items-center justify-center ${
+                    isPaused
+                      ? 'bg-yellow-100 dark:bg-yellow-900/30'
+                      : 'bg-primary-100 dark:bg-primary-900/30'
+                  }`}>
+                    {isPaused ? (
+                      <Pause className="w-8 h-8 text-yellow-500" />
+                    ) : (
+                      <Loader2 className="w-8 h-8 text-primary-500 animate-spin" />
+                    )}
                   </div>
                 </div>
 
-                <ProgressBar progress={processProgress} label="처리 진행률" color="primary" />
+                <ProgressBar
+                  progress={processProgress}
+                  label="처리 진행률"
+                  color="primary"
+                />
 
                 <p className="text-center text-sm text-gray-500 dark:text-gray-400 mt-4">
-                  영상을 렌더링하고 있습니다...
+                  {isPaused
+                    ? `${processProgress.toFixed(1)}%에서 일시 정지됨`
+                    : '영상을 렌더링하고 있습니다...'}
                 </p>
+
+                {/* Control buttons */}
+                <div className="flex justify-center gap-3 mt-6">
+                  <button
+                    onClick={handlePauseResume}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+                      isPaused
+                        ? 'bg-green-500 hover:bg-green-600 text-white'
+                        : 'bg-yellow-500 hover:bg-yellow-600 text-white'
+                    }`}
+                  >
+                    {isPaused ? (
+                      <>
+                        <Play className="w-4 h-4" />
+                        재개
+                      </>
+                    ) : (
+                      <>
+                        <Pause className="w-4 h-4" />
+                        일시 정지
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={handleStopProcessing}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors"
+                  >
+                    <Square className="w-4 h-4" />
+                    중지
+                  </button>
+                </div>
               </div>
             </div>
           </div>

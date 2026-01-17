@@ -32,6 +32,7 @@ class FaceParser:
             device: Device to use ('cuda', 'mps', 'cpu', or 'auto')
         """
         self.device = self._get_device(device)
+        self.face_detector = None
         self.face_parser = None
         self._initialized = False
         self._init_error = None
@@ -62,7 +63,8 @@ class FaceParser:
         try:
             import facer
 
-            # Initialize face parser from facer
+            # Initialize face detector and parser (cached)
+            self.face_detector = facer.face_detector("retinaface/mobilenet", device=self.device)
             self.face_parser = facer.face_parser("farl/lapa/448", device=self.device)
             self._facer_available = True
             logger.info(f"[FACE_PARSER] facer face parser loaded on {self.device}")
@@ -71,7 +73,7 @@ class FaceParser:
         except ImportError as e:
             self._init_error = f"facer not installed: {e}"
             logger.warning(f"[FACE_PARSER] {self._init_error}")
-            logger.info("[FACE_PARSER] Install with: pip install facer")
+            logger.info("[FACE_PARSER] Install with: pip install pyfacer")
             return False
         except Exception as e:
             self._init_error = str(e)
@@ -98,7 +100,6 @@ class FaceParser:
 
         try:
             import torch
-            import facer
 
             h, w = image.shape[:2]
 
@@ -110,33 +111,41 @@ class FaceParser:
             image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1).unsqueeze(0).float()
             image_tensor = image_tensor.to(self.device)
 
-            # Detect faces first
-            faces = facer.face_detector("retinaface/mobilenet", device=self.device)(
-                {"image": image_tensor}
-            )
+            # Detect faces
+            with torch.no_grad():
+                faces = self.face_detector({"image": image_tensor})
 
             if faces is None or "image_ids" not in faces or len(faces["image_ids"]) == 0:
                 logger.debug("[FACE_PARSER] No faces detected by facer")
                 return None
 
+            # Clone tensors to avoid the 'dict has no clone' error
+            faces_input = {"image": image_tensor.clone()}
+            for key, value in faces.items():
+                if isinstance(value, torch.Tensor):
+                    faces_input[key] = value.clone()
+                else:
+                    faces_input[key] = value
+
             # Run face parsing
             with torch.no_grad():
-                faces = self.face_parser({"image": image_tensor, **faces})
+                result = self.face_parser(faces_input)
 
-            if "seg" not in faces or "logits" not in faces["seg"]:
+            if "seg" not in result or "logits" not in result["seg"]:
+                logger.debug("[FACE_PARSER] No segmentation result")
                 return None
 
             # Get segmentation logits and convert to class predictions
-            seg_logits = faces["seg"]["logits"]  # (B, num_faces, C, H, W)
+            seg_logits = result["seg"]["logits"]  # (B, num_faces, C, H, W)
             seg_probs = seg_logits.softmax(dim=2)  # Softmax over classes
 
             # Find the face closest to the bbox (if provided)
-            if bbox is not None and "rects" in faces:
+            best_face_idx = 0
+            if bbox is not None and "rects" in result:
                 x1, y1, x2, y2 = bbox
                 bbox_cx, bbox_cy = (x1 + x2) / 2, (y1 + y2) / 2
 
-                rects = faces["rects"].cpu().numpy()  # (B, num_faces, 4)
-                best_face_idx = 0
+                rects = result["rects"].cpu().numpy()  # (B, num_faces, 4)
                 min_dist = float('inf')
 
                 for i, rect in enumerate(rects[0]):  # First batch
@@ -146,8 +155,6 @@ class FaceParser:
                     if dist < min_dist:
                         min_dist = dist
                         best_face_idx = i
-            else:
-                best_face_idx = 0
 
             # Get the segmentation for the selected face
             if seg_probs.shape[1] <= best_face_idx:

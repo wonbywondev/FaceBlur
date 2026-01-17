@@ -94,6 +94,21 @@ export const getDownloadUrl = (processId: string): string => {
   return `/api/v1/process/${processId}/download`;
 };
 
+export const stopProcessing = async (processId: string): Promise<{ status: string }> => {
+  const response = await api.post(`/process/${processId}/stop`);
+  return response.data;
+};
+
+export const pauseProcessing = async (processId: string): Promise<{ status: string }> => {
+  const response = await api.post(`/process/${processId}/pause`);
+  return response.data;
+};
+
+export const resumeProcessing = async (processId: string): Promise<{ status: string }> => {
+  const response = await api.post(`/process/${processId}/resume`);
+  return response.data;
+};
+
 export const getServiceInfo = async () => {
   const response = await api.get('/info');
   return response.data;

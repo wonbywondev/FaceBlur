@@ -1,4 +1,5 @@
 import logging
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,10 +21,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/process", tags=["process"])
 settings = get_settings()
 
+# Process control events (stop and pause signals)
+process_controls: dict[str, dict] = {}
+
 
 def run_blur_processing(process_id: str, analysis_id: str, blur_settings: dict):
     """Background task to process video with blur (runs in separate thread)."""
     logger.info(f"[BG] Starting background blur processing: {process_id}")
+
+    # Get control events
+    controls = process_controls.get(process_id, {})
+    stop_event = controls.get("stop_event")
+    pause_event = controls.get("pause_event")
     try:
         analysis = analyses.get(analysis_id)
         if not analysis:
@@ -97,6 +106,22 @@ def run_blur_processing(process_id: str, analysis_id: str, blur_settings: dict):
         processor = VideoProcessor()
 
         def progress_callback(progress):
+            # Check for stop signal
+            if stop_event and stop_event.is_set():
+                logger.info(f"[BG] Stop signal received at {progress:.1f}%")
+                raise InterruptedError("Processing stopped by user")
+
+            # Check for pause signal (block until resumed)
+            if pause_event and pause_event.is_set():
+                logger.info(f"[BG] Paused at {progress:.1f}%")
+                processes[process_id]["status"] = ProcessStatus.PAUSED
+                while pause_event.is_set():
+                    if stop_event and stop_event.is_set():
+                        raise InterruptedError("Processing stopped by user")
+                    pause_event.wait(timeout=0.5)
+                processes[process_id]["status"] = ProcessStatus.PROCESSING
+                logger.info(f"[BG] Resumed at {progress:.1f}%")
+
             processes[process_id]["progress"] = progress
             if int(progress) % 20 == 0:
                 logger.info(f"[BG] Processing progress: {progress:.1f}%")
@@ -115,10 +140,18 @@ def run_blur_processing(process_id: str, analysis_id: str, blur_settings: dict):
         processes[process_id]["output_path"] = str(output_path)
         processes[process_id]["result"] = result
 
+    except InterruptedError as e:
+        logger.info(f"[BG] Processing interrupted: {e}")
+        processes[process_id]["status"] = ProcessStatus.STOPPED
+        processes[process_id]["error"] = str(e)
     except Exception as e:
         logger.error(f"[BG] Processing error: {e}", exc_info=True)
         processes[process_id]["status"] = ProcessStatus.FAILED
         processes[process_id]["error"] = str(e)
+    finally:
+        # Clean up control events
+        if process_id in process_controls:
+            del process_controls[process_id]
 
 
 @router.post("/blur", response_model=ProcessResponse)
@@ -189,6 +222,12 @@ async def start_blur_processing(
         "progress": 0,
         "output_path": None,
         "error": None
+    }
+
+    # Create control events for stop/pause
+    process_controls[process_id] = {
+        "stop_event": threading.Event(),
+        "pause_event": threading.Event()
     }
 
     # Start background processing
@@ -278,3 +317,81 @@ async def update_face_blur_settings(
     # This would update the session state for re-processing
     # Implementation depends on your state management approach
     return {"status": "updated", "face_ids": face_ids, "blur_enabled": blur_enabled}
+
+
+@router.post("/{process_id}/stop")
+async def stop_processing(process_id: str):
+    """Stop the video processing."""
+    if process_id not in processes:
+        raise HTTPException(status_code=404, detail="Process not found")
+
+    process = processes[process_id]
+    status = process["status"]
+    status_value = status.value if hasattr(status, 'value') else str(status)
+
+    if status_value not in [ProcessStatus.PROCESSING.value, ProcessStatus.PAUSED.value]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot stop process in state: {status_value}"
+        )
+
+    controls = process_controls.get(process_id)
+    if controls and "stop_event" in controls:
+        controls["stop_event"].set()
+        # Also clear pause to allow the loop to exit
+        if "pause_event" in controls:
+            controls["pause_event"].clear()
+        logger.info(f"[STOP] Stop signal sent for process: {process_id}")
+        return {"status": "stopping", "process_id": process_id}
+
+    raise HTTPException(status_code=500, detail="Control events not found")
+
+
+@router.post("/{process_id}/pause")
+async def pause_processing(process_id: str):
+    """Pause the video processing."""
+    if process_id not in processes:
+        raise HTTPException(status_code=404, detail="Process not found")
+
+    process = processes[process_id]
+    status = process["status"]
+    status_value = status.value if hasattr(status, 'value') else str(status)
+
+    if status_value != ProcessStatus.PROCESSING.value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot pause process in state: {status_value}"
+        )
+
+    controls = process_controls.get(process_id)
+    if controls and "pause_event" in controls:
+        controls["pause_event"].set()
+        logger.info(f"[PAUSE] Pause signal sent for process: {process_id}")
+        return {"status": "pausing", "process_id": process_id}
+
+    raise HTTPException(status_code=500, detail="Control events not found")
+
+
+@router.post("/{process_id}/resume")
+async def resume_processing(process_id: str):
+    """Resume the video processing."""
+    if process_id not in processes:
+        raise HTTPException(status_code=404, detail="Process not found")
+
+    process = processes[process_id]
+    status = process["status"]
+    status_value = status.value if hasattr(status, 'value') else str(status)
+
+    if status_value != ProcessStatus.PAUSED.value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot resume process in state: {status_value}"
+        )
+
+    controls = process_controls.get(process_id)
+    if controls and "pause_event" in controls:
+        controls["pause_event"].clear()
+        logger.info(f"[RESUME] Resume signal sent for process: {process_id}")
+        return {"status": "resuming", "process_id": process_id}
+
+    raise HTTPException(status_code=500, detail="Control events not found")
