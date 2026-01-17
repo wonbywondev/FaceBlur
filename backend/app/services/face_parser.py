@@ -1,37 +1,27 @@
 """
-BiSeNet Face Parsing Service
+Face Parsing Service using facer library
 
 Provides pixel-level face segmentation for precise blur masks.
-Uses a pretrained BiSeNet model for 19-class face parsing.
-
-Classes:
-    0: background, 1: skin, 2: l_brow, 3: r_brow, 4: l_eye, 5: r_eye,
-    6: eye_g (glasses), 7: l_ear, 8: r_ear, 9: ear_r, 10: nose,
-    11: mouth, 12: u_lip, 13: l_lip, 14: neck, 15: neck_l, 16: cloth,
-    17: hair, 18: hat
+Uses facer library which includes pretrained face parsing models.
 """
-import os
 import logging
 import numpy as np
 import cv2
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Face classes to include in blur mask (skin + facial features, excluding hair/neck/cloth)
-FACE_CLASSES = [1, 2, 3, 4, 5, 6, 10, 11, 12, 13]  # skin, brows, eyes, glasses, nose, mouth, lips
-
-# Model download URL (CelebAMask-HQ pretrained BiSeNet)
-MODEL_URL = "https://github.com/zllrunning/face-parsing.PyTorch/releases/download/v1.0/79999_iter.pth"
-MODEL_DIR = Path(__file__).parent.parent.parent / "models"
-MODEL_PATH = MODEL_DIR / "bisenet_face_parsing.pth"
+# Face classes to include in blur mask
+# facer uses: 0=background, 1=face skin, 2=left eyebrow, 3=right eyebrow,
+# 4=left eye, 5=right eye, 6=nose, 7=upper lip, 8=inner mouth, 9=lower lip, 10=hair
+FACE_SKIN_CLASSES = [1, 2, 3, 4, 5, 6, 7, 8, 9]  # Exclude background and hair
 
 
 class FaceParser:
     """
-    Face parsing using BiSeNet for precise face segmentation.
-    Falls back to ellipse mask if model loading fails.
+    Face parsing using facer library for precise face segmentation.
+    Falls back to ellipse mask if facer is not available.
     """
 
     def __init__(self, device: str = "auto"):
@@ -42,10 +32,10 @@ class FaceParser:
             device: Device to use ('cuda', 'mps', 'cpu', or 'auto')
         """
         self.device = self._get_device(device)
-        self.model = None
-        self.transform = None
+        self.face_parser = None
         self._initialized = False
         self._init_error = None
+        self._facer_available = False
 
     def _get_device(self, device: str) -> str:
         """Determine the best available device."""
@@ -63,207 +53,42 @@ class FaceParser:
         return "cpu"
 
     def _ensure_model(self) -> bool:
-        """Download model if not exists and load it."""
+        """Load facer face parser model."""
         if self._initialized:
-            return self.model is not None
+            return self._facer_available
 
         self._initialized = True
 
         try:
-            import torch
-            import torch.nn as nn
-            from torchvision import transforms
+            import facer
 
-            # Create model directory
-            MODEL_DIR.mkdir(parents=True, exist_ok=True)
-
-            # Download model if needed
-            if not MODEL_PATH.exists():
-                logger.info(f"Downloading BiSeNet face parsing model to {MODEL_PATH}...")
-                self._download_model()
-
-            if not MODEL_PATH.exists():
-                logger.warning("BiSeNet model not available, using ellipse fallback")
-                return False
-
-            # Build BiSeNet model
-            self.model = self._build_bisenet()
-            self.model.load_state_dict(torch.load(MODEL_PATH, map_location=self.device))
-            self.model.to(self.device)
-            self.model.eval()
-
-            # Setup transform
-            self.transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
-                )
-            ])
-
-            logger.info(f"BiSeNet face parser loaded successfully on {self.device}")
+            # Initialize face parser from facer
+            self.face_parser = facer.face_parser("farl/lapa/448", device=self.device)
+            self._facer_available = True
+            logger.info(f"[FACE_PARSER] facer face parser loaded on {self.device}")
             return True
 
+        except ImportError as e:
+            self._init_error = f"facer not installed: {e}"
+            logger.warning(f"[FACE_PARSER] {self._init_error}")
+            logger.info("[FACE_PARSER] Install with: pip install facer")
+            return False
         except Exception as e:
             self._init_error = str(e)
-            logger.warning(f"Failed to load BiSeNet model: {e}")
+            logger.warning(f"[FACE_PARSER] Failed to load facer: {e}")
             return False
-
-    def _download_model(self):
-        """Download the pretrained model."""
-        try:
-            import urllib.request
-            urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-            logger.info("BiSeNet model downloaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to download BiSeNet model: {e}")
-
-    def _build_bisenet(self):
-        """Build BiSeNet architecture."""
-        import torch
-        import torch.nn as nn
-        import torch.nn.functional as F
-
-        class ConvBNReLU(nn.Module):
-            def __init__(self, in_ch, out_ch, ks=3, stride=1, padding=1):
-                super().__init__()
-                self.conv = nn.Conv2d(in_ch, out_ch, ks, stride, padding, bias=False)
-                self.bn = nn.BatchNorm2d(out_ch)
-
-            def forward(self, x):
-                return F.relu(self.bn(self.conv(x)))
-
-        class AttentionRefinementModule(nn.Module):
-            def __init__(self, in_ch, out_ch):
-                super().__init__()
-                self.conv = ConvBNReLU(in_ch, out_ch, 3, 1, 1)
-                self.conv_atten = nn.Conv2d(out_ch, out_ch, 1, bias=False)
-                self.bn_atten = nn.BatchNorm2d(out_ch)
-
-            def forward(self, x):
-                feat = self.conv(x)
-                atten = F.adaptive_avg_pool2d(feat, 1)
-                atten = self.conv_atten(atten)
-                atten = self.bn_atten(atten)
-                atten = torch.sigmoid(atten)
-                return feat * atten
-
-        class ContextPath(nn.Module):
-            def __init__(self):
-                super().__init__()
-                from torchvision.models import resnet18
-                resnet = resnet18(weights=None)
-                self.conv1 = resnet.conv1
-                self.bn1 = resnet.bn1
-                self.relu = resnet.relu
-                self.maxpool = resnet.maxpool
-                self.layer1 = resnet.layer1
-                self.layer2 = resnet.layer2
-                self.layer3 = resnet.layer3
-                self.layer4 = resnet.layer4
-                self.arm16 = AttentionRefinementModule(256, 128)
-                self.arm32 = AttentionRefinementModule(512, 128)
-                self.conv_head32 = ConvBNReLU(128, 128, 3, 1, 1)
-                self.conv_head16 = ConvBNReLU(128, 128, 3, 1, 1)
-                self.conv_avg = ConvBNReLU(512, 128, 1, 1, 0)
-
-            def forward(self, x):
-                x = self.conv1(x)
-                x = self.bn1(x)
-                x = self.relu(x)
-                x = self.maxpool(x)
-                feat4 = self.layer1(x)
-                feat8 = self.layer2(feat4)
-                feat16 = self.layer3(feat8)
-                feat32 = self.layer4(feat16)
-
-                avg = F.adaptive_avg_pool2d(feat32, 1)
-                avg = self.conv_avg(avg)
-                avg_up = F.interpolate(avg, size=feat32.shape[2:], mode='nearest')
-
-                feat32_arm = self.arm32(feat32)
-                feat32_sum = feat32_arm + avg_up
-                feat32_up = F.interpolate(feat32_sum, size=feat16.shape[2:], mode='nearest')
-                feat32_up = self.conv_head32(feat32_up)
-
-                feat16_arm = self.arm16(feat16)
-                feat16_sum = feat16_arm + feat32_up
-                feat16_up = F.interpolate(feat16_sum, size=feat8.shape[2:], mode='nearest')
-                feat16_up = self.conv_head16(feat16_up)
-
-                return feat8, feat16_up, feat32_up
-
-        class SpatialPath(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.conv1 = ConvBNReLU(3, 64, 7, 2, 3)
-                self.conv2 = ConvBNReLU(64, 64, 3, 2, 1)
-                self.conv3 = ConvBNReLU(64, 64, 3, 2, 1)
-                self.conv_out = ConvBNReLU(64, 128, 1, 1, 0)
-
-            def forward(self, x):
-                x = self.conv1(x)
-                x = self.conv2(x)
-                x = self.conv3(x)
-                return self.conv_out(x)
-
-        class FeatureFusionModule(nn.Module):
-            def __init__(self, in_ch, out_ch):
-                super().__init__()
-                self.convblk = ConvBNReLU(in_ch, out_ch, 1, 1, 0)
-                self.conv1 = nn.Conv2d(out_ch, out_ch // 4, 1, bias=False)
-                self.conv2 = nn.Conv2d(out_ch // 4, out_ch, 1, bias=False)
-
-            def forward(self, fsp, fcp):
-                feat = torch.cat([fsp, fcp], dim=1)
-                feat = self.convblk(feat)
-                atten = F.adaptive_avg_pool2d(feat, 1)
-                atten = F.relu(self.conv1(atten))
-                atten = torch.sigmoid(self.conv2(atten))
-                return feat + feat * atten
-
-        class BiSeNet(nn.Module):
-            def __init__(self, n_classes=19):
-                super().__init__()
-                self.cp = ContextPath()
-                self.sp = SpatialPath()
-                self.ffm = FeatureFusionModule(256, 256)
-                self.conv_out = nn.Sequential(
-                    ConvBNReLU(256, 256, 3, 1, 1),
-                    nn.Conv2d(256, n_classes, 1, bias=False)
-                )
-                self.conv_out16 = nn.Sequential(
-                    ConvBNReLU(128, 64, 3, 1, 1),
-                    nn.Conv2d(64, n_classes, 1, bias=False)
-                )
-                self.conv_out32 = nn.Sequential(
-                    ConvBNReLU(128, 64, 3, 1, 1),
-                    nn.Conv2d(64, n_classes, 1, bias=False)
-                )
-
-            def forward(self, x):
-                feat_sp = self.sp(x)
-                feat8, feat16, feat32 = self.cp(x)
-                feat_fuse = self.ffm(feat_sp, feat8)
-                feat_out = self.conv_out(feat_fuse)
-                feat_out = F.interpolate(feat_out, size=x.shape[2:], mode='bilinear', align_corners=True)
-                return feat_out
-
-        return BiSeNet(n_classes=19)
 
     def parse_face(
         self,
         image: np.ndarray,
         bbox: Optional[List[int]] = None,
-        target_size: Tuple[int, int] = (512, 512)
     ) -> Optional[np.ndarray]:
         """
         Parse face and return segmentation mask.
 
         Args:
             image: Input image (BGR)
-            bbox: Optional bounding box [x1, y1, x2, y2] to crop face region
-            target_size: Size to resize image for model input
+            bbox: Optional bounding box [x1, y1, x2, y2] to focus on face region
 
         Returns:
             Binary mask of face region (0-255), or None if parsing failed
@@ -273,62 +98,84 @@ class FaceParser:
 
         try:
             import torch
+            import facer
 
             h, w = image.shape[:2]
 
-            # Crop to bbox if provided
-            if bbox is not None:
-                x1, y1, x2, y2 = bbox
-                # Add padding around face
-                pad = int(max(x2 - x1, y2 - y1) * 0.3)
-                x1 = max(0, x1 - pad)
-                y1 = max(0, y1 - pad)
-                x2 = min(w, x2 + pad)
-                y2 = min(h, y2 + pad)
-                face_crop = image[y1:y2, x1:x2]
-                crop_bbox = (x1, y1, x2, y2)
-            else:
-                face_crop = image
-                crop_bbox = (0, 0, w, h)
-
             # Convert BGR to RGB
-            face_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-            # Resize for model
-            crop_h, crop_w = face_crop.shape[:2]
-            face_resized = cv2.resize(face_rgb, target_size)
+            # Convert to tensor and add batch dimension
+            # facer expects (B, C, H, W) with values in [0, 255]
+            image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1).unsqueeze(0).float()
+            image_tensor = image_tensor.to(self.device)
 
-            # Transform and run model
-            input_tensor = self.transform(face_resized).unsqueeze(0).to(self.device)
+            # Detect faces first
+            faces = facer.face_detector("retinaface/mobilenet", device=self.device)(
+                {"image": image_tensor}
+            )
 
+            if faces is None or "image_ids" not in faces or len(faces["image_ids"]) == 0:
+                logger.debug("[FACE_PARSER] No faces detected by facer")
+                return None
+
+            # Run face parsing
             with torch.no_grad():
-                output = self.model(input_tensor)
-                parsing = output.squeeze(0).argmax(0).cpu().numpy()
+                faces = self.face_parser({"image": image_tensor, **faces})
 
-            # Create binary mask from face classes
-            mask = np.zeros(parsing.shape, dtype=np.uint8)
-            for class_id in FACE_CLASSES:
-                mask[parsing == class_id] = 255
+            if "seg" not in faces or "logits" not in faces["seg"]:
+                return None
 
-            # Resize mask back to crop size
-            mask = cv2.resize(mask, (crop_w, crop_h), interpolation=cv2.INTER_NEAREST)
+            # Get segmentation logits and convert to class predictions
+            seg_logits = faces["seg"]["logits"]  # (B, num_faces, C, H, W)
+            seg_probs = seg_logits.softmax(dim=2)  # Softmax over classes
 
-            # Create full-frame mask
-            full_mask = np.zeros((h, w), dtype=np.uint8)
-            x1, y1, x2, y2 = crop_bbox
-            full_mask[y1:y2, x1:x2] = mask
+            # Find the face closest to the bbox (if provided)
+            if bbox is not None and "rects" in faces:
+                x1, y1, x2, y2 = bbox
+                bbox_cx, bbox_cy = (x1 + x2) / 2, (y1 + y2) / 2
+
+                rects = faces["rects"].cpu().numpy()  # (B, num_faces, 4)
+                best_face_idx = 0
+                min_dist = float('inf')
+
+                for i, rect in enumerate(rects[0]):  # First batch
+                    face_cx = (rect[0] + rect[2]) / 2
+                    face_cy = (rect[1] + rect[3]) / 2
+                    dist = (face_cx - bbox_cx)**2 + (face_cy - bbox_cy)**2
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_face_idx = i
+            else:
+                best_face_idx = 0
+
+            # Get the segmentation for the selected face
+            if seg_probs.shape[1] <= best_face_idx:
+                best_face_idx = 0
+
+            face_seg = seg_probs[0, best_face_idx]  # (C, H, W)
+            face_classes = face_seg.argmax(dim=0).cpu().numpy()  # (H, W)
+
+            # Create binary mask from face skin classes
+            mask = np.zeros(face_classes.shape, dtype=np.uint8)
+            for class_id in FACE_SKIN_CLASSES:
+                mask[face_classes == class_id] = 255
+
+            # Resize mask to original image size if needed
+            if mask.shape[0] != h or mask.shape[1] != w:
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
             # Smooth edges for natural blending
-            full_mask = cv2.GaussianBlur(full_mask, (15, 15), 0)
+            mask = cv2.GaussianBlur(mask, (15, 15), 0)
 
             # Fill holes in the mask
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            full_mask = cv2.morphologyEx(full_mask, cv2.MORPH_CLOSE, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-            return full_mask
+            return mask
 
         except Exception as e:
-            logger.error(f"Face parsing failed: {e}")
+            logger.error(f"[FACE_PARSER] Face parsing failed: {e}")
             return None
 
     def is_available(self) -> bool:

@@ -538,10 +538,10 @@ class VideoProcessor:
                 "-i", processed_video_path,  # Processed video (no audio)
                 "-i", original_path,          # Original video (for audio)
                 "-c:v", "libx264",            # H.264 video codec
-                "-preset", "medium",          # Balance speed/quality
-                "-crf", "23",                 # Quality (18-28, lower=better)
+                "-preset", "slow",            # Better compression (slower encode)
+                "-crf", "26",                 # Quality (18-28, higher=smaller file)
                 "-c:a", "aac",                # AAC audio codec
-                "-b:a", "192k",               # Audio bitrate
+                "-b:a", "128k",               # Audio bitrate (128k is sufficient)
                 "-map", "0:v:0",              # Use video from first input
                 "-map", "1:a:0?",             # Use audio from second input (optional)
                 "-movflags", "+faststart",    # Web optimization

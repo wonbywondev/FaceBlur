@@ -10,6 +10,7 @@ insightface>=0.7.0
 onnxruntime>=1.16.0
 opencv-python>=4.9.0
 mediapipe>=0.10.0
+pyfacer>=0.0.5
 numpy>=1.24.0
 scipy>=1.11.0
 pillow>=10.0.0

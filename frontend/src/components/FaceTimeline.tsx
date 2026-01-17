@@ -85,38 +85,38 @@ export function FaceTimeline({ faces, videoDuration, selectedFaces, onToggleFace
       {/* Scrollable timeline container */}
       <div
         ref={scrollContainerRef}
-        className="overflow-x-auto pb-4"
+        className="overflow-x-auto pb-2"
         style={{ scrollbarWidth: 'thin' }}
       >
         <div
           className="relative"
-          style={{ width: `${Math.max(totalWidth, 800)}px`, minHeight: '200px' }}
+          style={{ width: `${Math.max(totalWidth, 800)}px`, minHeight: '280px' }}
         >
-          {/* Time axis at bottom */}
-          <div className="absolute bottom-0 left-0 right-0 h-8 border-t border-gray-200 dark:border-gray-700">
+          {/* Time axis at TOP */}
+          <div className="absolute top-0 left-0 right-0 h-8 border-b border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800/50">
             {/* Time markers every 5 seconds */}
             {Array.from({ length: Math.ceil(videoDuration / 5) + 1 }, (_, i) => i * 5).map(
               (time) => (
                 <div
                   key={time}
-                  className="absolute bottom-0 transform -translate-x-1/2"
+                  className="absolute top-0 transform -translate-x-1/2"
                   style={{ left: `${(time / videoDuration) * 100}%` }}
                 >
-                  <div className="w-px h-3 bg-gray-400 dark:bg-gray-500 mb-1" />
-                  <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                  <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap block pt-1">
                     {formatTime(time)}
                   </span>
+                  <div className="w-px h-2 bg-gray-400 dark:bg-gray-500 mt-1" />
                 </div>
               )
             )}
           </div>
 
-          {/* Face towers at each time slot */}
-          <div className="absolute bottom-10 left-0 right-0 flex">
+          {/* Face towers BELOW the time axis */}
+          <div className="absolute top-10 left-0 right-0 flex">
             {timeSlots.map((slot, slotIndex) => (
               <div
                 key={slotIndex}
-                className="flex-shrink-0 flex flex-col-reverse items-center gap-1"
+                className="flex-shrink-0 flex flex-col items-center gap-1 pt-2"
                 style={{ width: `${slotWidth}px` }}
               >
                 {slot.faces.map(({ face }) => {
@@ -127,7 +127,7 @@ export function FaceTimeline({ faces, videoDuration, selectedFaces, onToggleFace
                       key={face.face_id}
                       onClick={() => onToggleFace(face.face_id)}
                       className={`
-                        w-10 h-10 rounded-lg overflow-hidden cursor-pointer
+                        relative w-10 h-10 rounded-lg overflow-hidden cursor-pointer
                         transition-all duration-150 hover:scale-110 hover:z-10
                         ${isBlurEnabled
                           ? 'ring-2 ring-red-500 shadow-red-200'
