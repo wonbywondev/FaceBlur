@@ -1,5 +1,7 @@
 export type BlurType = 'gaussian' | 'mosaic' | 'blackout';
 
+export type ExpectedPersonCount = '5' | '10' | '20' | 'many';
+
 export type ProcessStatus = 'uploaded' | 'processing' | 'analyzing' | 'paused' | 'completed' | 'stopped' | 'failed';
 
 export interface Resolution {

@@ -32,9 +32,12 @@ def get_face_embedder() -> FaceEmbedder:
     return FaceEmbedder()
 
 
-def get_face_matcher() -> FaceMatcher:
+def get_face_matcher(expected_persons: str = "10") -> FaceMatcher:
     """Get or create face matcher instance."""
-    return FaceMatcher(similarity_threshold=settings.face_similarity_threshold)
+    return FaceMatcher(
+        similarity_threshold=settings.face_similarity_threshold,
+        expected_persons=expected_persons
+    )
 
 
 def get_video_processor() -> VideoProcessor:

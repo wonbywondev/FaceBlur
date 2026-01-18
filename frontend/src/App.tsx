@@ -23,6 +23,7 @@ import { ProgressBar } from './components/ProgressBar';
 import { BlurSettings } from './components/BlurSettings';
 import { useVideoProcessor } from './hooks/useVideoProcessor';
 import * as api from './services/api';
+import type { ExpectedPersonCount } from './types';
 
 type ViewMode = 'grid' | 'timeline';
 
@@ -59,6 +60,7 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [isPaused, setIsPaused] = useState(false);
+  const [expectedPersons, setExpectedPersons] = useState<ExpectedPersonCount>('10');
 
   // Poll for analysis progress
   useEffect(() => {
@@ -164,7 +166,7 @@ function App() {
     setStep('analyzing');
 
     try {
-      const result = await api.startAnalysis(videoData.video_id);
+      const result = await api.startAnalysis(videoData.video_id, undefined, expectedPersons);
       setAnalysisId(result.analysis_id);
     } catch (err: any) {
       setError(err.response?.data?.detail || '분석 시작에 실패했습니다.');
@@ -359,6 +361,25 @@ function App() {
                     <p className="text-sm text-blue-700 dark:text-blue-300">
                       💡 AI가 영상을 분석하여 등장하는 모든 얼굴을 자동으로 감지합니다.
                       분석 완료 후 블러 처리할 얼굴을 선택할 수 있습니다.
+                    </p>
+                  </div>
+
+                  <div className="mt-4">
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      예상 인원수
+                    </label>
+                    <select
+                      value={expectedPersons}
+                      onChange={(e) => setExpectedPersons(e.target.value as ExpectedPersonCount)}
+                      className="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                    >
+                      <option value="5">약 5명 (소규모)</option>
+                      <option value="10">약 10명 (일반)</option>
+                      <option value="20">약 20명 (중규모)</option>
+                      <option value="many">많음 (단체/군중)</option>
+                    </select>
+                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      인원수에 따라 얼굴 그룹핑 정확도가 조정됩니다
                     </p>
                   </div>
                 </div>

@@ -11,6 +11,14 @@ class BlurType(str, Enum):
     BLACKOUT = "blackout"
 
 
+class ExpectedPersonCount(str, Enum):
+    """Expected number of people in video for clustering optimization."""
+    FIVE = "5"        # ~5 people (stricter matching)
+    TEN = "10"        # ~10 people
+    TWENTY = "20"     # ~20 people
+    MANY = "many"     # Many people / crowd (more lenient matching)
+
+
 class ProcessStatus(str, Enum):
     UPLOADED = "uploaded"
     PROCESSING = "processing"
@@ -43,6 +51,7 @@ class ReferenceUploadResponse(BaseModel):
 class AnalyzeRequest(BaseModel):
     video_id: str
     reference_id: Optional[str] = None  # Optional - for video-first flow
+    expected_persons: Optional[ExpectedPersonCount] = ExpectedPersonCount.TEN  # Default ~10 people
 
 
 class AnalyzeResponse(BaseModel):

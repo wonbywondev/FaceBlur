@@ -31,10 +31,10 @@ router = APIRouter(prefix="/analyze", tags=["analyze"])
 settings = get_settings()
 
 
-def run_analysis(analysis_id: str, session_id: str):
+def run_analysis(analysis_id: str, session_id: str, expected_persons: str = "10"):
     """Background task to run video analysis (sync function for thread execution)."""
     try:
-        logger.info(f"Starting analysis {analysis_id} for session {session_id}")
+        logger.info(f"Starting analysis {analysis_id} for session {session_id} (expected ~{expected_persons} people)")
 
         session = sessions.get(session_id)
         if not session:
@@ -56,7 +56,7 @@ def run_analysis(analysis_id: str, session_id: str):
 
         detector = get_face_detector()
         embedder = get_face_embedder()
-        matcher = get_face_matcher()
+        matcher = get_face_matcher(expected_persons=expected_persons)
         processor = get_video_processor()
 
         analyses[analysis_id]["progress"] = 10
@@ -204,6 +204,9 @@ async def start_analysis(
     video_info = session.get("video_info", {})
     estimated_time = int(video_info.get("duration", 60) / 10)  # Rough estimate
 
+    # Get expected persons value
+    expected_persons = request.expected_persons.value if request.expected_persons else "10"
+
     analyses[analysis_id] = {
         "id": analysis_id,
         "session_id": session_id,
@@ -211,12 +214,13 @@ async def start_analysis(
         "progress": 0,
         "faces_detected": 0,
         "frames_processed": 0,
+        "expected_persons": expected_persons,
         "result": None,
         "error": None
     }
 
     # Start background analysis
-    background_tasks.add_task(run_analysis, analysis_id, session_id)
+    background_tasks.add_task(run_analysis, analysis_id, session_id, expected_persons)
 
     return AnalyzeResponse(
         analysis_id=analysis_id,

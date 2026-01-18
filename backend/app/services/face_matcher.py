@@ -5,16 +5,33 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Threshold mapping based on expected person count
+# Video analysis needs lower thresholds due to lighting/angle variations
+# Fewer people = stricter matching (higher threshold)
+# More people = more lenient matching (lower threshold)
+PERSON_COUNT_THRESHOLDS = {
+    "5": 0.38,     # Strict: fewer clusters for small groups
+    "10": 0.30,    # Default: balanced
+    "20": 0.24,    # Lenient: allow more variation
+    "many": 0.18,  # Very lenient: many people / crowd
+}
+
 
 class FaceMatcher:
-    def __init__(self, similarity_threshold: float = 0.6):
+    def __init__(self, similarity_threshold: float = 0.6, expected_persons: str = "10"):
         """
         Initialize face matcher.
 
         Args:
-            similarity_threshold: Threshold for considering faces as same person (0-1)
+            similarity_threshold: Base threshold for considering faces as same person (0-1)
+            expected_persons: Expected number of people ("5", "10", "20", "many")
         """
-        self.similarity_threshold = similarity_threshold
+        # Use expected persons to adjust threshold if provided
+        if expected_persons in PERSON_COUNT_THRESHOLDS:
+            self.similarity_threshold = PERSON_COUNT_THRESHOLDS[expected_persons]
+            logger.info(f"[MATCHER] Using threshold {self.similarity_threshold} for ~{expected_persons} people")
+        else:
+            self.similarity_threshold = similarity_threshold
 
     def calculate_similarity(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
         """
@@ -71,6 +88,7 @@ class FaceMatcher:
             List of face clusters with appearances
         """
         clusters = []
+        logger.info(f"[CLUSTER] Starting clustering with threshold={self.similarity_threshold} ({self.similarity_threshold * 100}%)")
 
         for detection in face_detections:
             if detection.get("embedding") is None:
@@ -134,6 +152,7 @@ class FaceMatcher:
         # Sort clusters by first appearance
         clusters.sort(key=lambda c: c["appearances"][0]["timestamp"])
 
+        logger.info(f"[CLUSTER] Result: {len(face_detections)} detections → {len(clusters)} clusters (threshold={self.similarity_threshold * 100}%)")
         return clusters
 
     def merge_appearances(

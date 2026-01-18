@@ -6,6 +6,7 @@ import type {
   BlurSettings,
   AnalysisProgress,
   ProcessProgress,
+  ExpectedPersonCount,
 } from '../types';
 
 const api = axios.create({
@@ -50,10 +51,12 @@ export const uploadReference = async (
 
 export const startAnalysis = async (
   videoId: string,
-  referenceId?: string
+  referenceId?: string,
+  expectedPersons: ExpectedPersonCount = '10'
 ): Promise<{ analysis_id: string; estimated_time: number }> => {
-  const payload: { video_id: string; reference_id?: string } = {
+  const payload: { video_id: string; reference_id?: string; expected_persons: string } = {
     video_id: videoId,
+    expected_persons: expectedPersons,
   };
   if (referenceId) {
     payload.reference_id = referenceId;
