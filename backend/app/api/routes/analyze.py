@@ -75,7 +75,8 @@ def run_analysis(analysis_id: str, session_id: str, expected_persons: str = "10"
         for frame_data in detector.process_video(
             video_path,
             sample_rate=settings.frame_sample_rate,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            skip_detection=True  # Use InsightFace for detection+embedding
         ):
             frame = frame_data["frame"]
             timestamp = frame_data["timestamp"]
@@ -85,12 +86,15 @@ def run_analysis(analysis_id: str, session_id: str, expected_persons: str = "10"
             face_results = embedder.detect_and_embed(frame)
 
             for face in face_results:
+                # Only store frame for high-confidence detections (for thumbnails)
+                # This reduces memory usage significantly
+                store_frame = face["det_score"] > 0.7
                 all_detections.append({
                     "embedding": face["embedding"],
                     "bbox": face["bbox"],
                     "timestamp": timestamp,
                     "frame_number": frame_number,
-                    "frame": frame.copy(),
+                    "frame": frame.copy() if store_frame else None,
                     "det_score": face["det_score"]
                 })
 

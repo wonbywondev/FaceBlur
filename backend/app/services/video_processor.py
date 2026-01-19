@@ -4,6 +4,8 @@ from typing import List, Dict, Optional, Callable
 from enum import Enum
 from pathlib import Path
 import logging
+import subprocess
+import shutil
 
 from .face_parser import get_face_parser
 
@@ -275,7 +277,7 @@ class VideoProcessor:
 
         # If we have a mask, use it for precise blur
         if mask is not None:
-            result = self._apply_blur_with_mask(frame, mask, blur_type, intensity)
+            result = self._apply_blur_with_mask(frame, mask, blur_type, intensity, bbox=[x1, y1, x2, y2])
             # Store segmentation result for tracking
             self._last_blur_used_segmentation = True
             return result
@@ -315,46 +317,76 @@ class VideoProcessor:
         frame: np.ndarray,
         mask: np.ndarray,
         blur_type: BlurType,
-        intensity: int
+        intensity: int,
+        bbox: Optional[List[int]] = None
     ) -> np.ndarray:
         """
         Apply blur using a face contour mask for precise edges.
+        Optimized: only processes the bbox region for better performance.
 
         Args:
             frame: Input frame (BGR)
             mask: Binary mask (255 = blur area)
             blur_type: Type of blur
             intensity: Blur intensity
+            bbox: Optional bounding box for ROI optimization
 
         Returns:
             Frame with masked blur applied
         """
-        # Create blurred version of entire frame
+        h, w = frame.shape[:2]
+
+        # BLACKOUT optimization: directly apply mask without creating blurred frame
+        if blur_type == BlurType.BLACKOUT:
+            # Fast path: set masked pixels to black
+            mask_bool = mask > 127
+            frame[mask_bool] = 0
+            return frame
+
+        # For GAUSSIAN/MOSAIC, work on ROI if bbox provided
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox
+            # Add padding for blur kernel
+            pad = intensity * 2
+            x1 = max(0, x1 - pad)
+            y1 = max(0, y1 - pad)
+            x2 = min(w, x2 + pad)
+            y2 = min(h, y2 + pad)
+
+            roi = frame[y1:y2, x1:x2]
+            roi_mask = mask[y1:y2, x1:x2]
+        else:
+            roi = frame
+            roi_mask = mask
+            x1, y1 = 0, 0
+
+        # Create blurred version of ROI only (not entire frame)
         if blur_type == BlurType.GAUSSIAN:
             kernel_size = intensity * 2 + 1
-            blurred = cv2.GaussianBlur(frame, (kernel_size, kernel_size), 0)
+            blurred = cv2.GaussianBlur(roi, (kernel_size, kernel_size), 0)
 
         elif blur_type == BlurType.MOSAIC:
-            h, w = frame.shape[:2]
+            roi_h, roi_w = roi.shape[:2]
             scale = max(1, intensity // 3)
-            small_w = max(1, w // scale)
-            small_h = max(1, h // scale)
-            small = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
-            blurred = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-
-        elif blur_type == BlurType.BLACKOUT:
-            blurred = np.zeros_like(frame)
+            small_w = max(1, roi_w // scale)
+            small_h = max(1, roi_h // scale)
+            small = cv2.resize(roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+            blurred = cv2.resize(small, (roi_w, roi_h), interpolation=cv2.INTER_NEAREST)
 
         else:
             return frame
 
-        # Normalize mask to 0-1 range for blending
-        mask_normalized = mask.astype(np.float32) / 255.0
+        # Blend using mask (ROI only)
+        mask_normalized = roi_mask.astype(np.float32) / 255.0
         mask_3ch = np.stack([mask_normalized] * 3, axis=-1)
 
-        # Blend original and blurred using mask
-        result = (frame * (1 - mask_3ch) + blurred * mask_3ch).astype(np.uint8)
-        return result
+        blended = (roi * (1 - mask_3ch) + blurred * mask_3ch).astype(np.uint8)
+
+        if bbox is not None:
+            frame[y1:y2, x1:x2] = blended
+            return frame
+        else:
+            return blended
 
     def interpolate_bbox(
         self,
@@ -404,6 +436,133 @@ class VideoProcessor:
 
         return None
 
+    def _build_frame_bbox_map(
+        self,
+        blur_targets: List[Dict],
+        fps: float,
+        total_frames: int
+    ) -> Dict[int, List[List[int]]]:
+        """
+        Pre-compute frame → bboxes mapping for fast lookup.
+        Only frames with faces are included in the map.
+        """
+        frame_map = {}
+
+        for target in blur_targets:
+            for app in target["appearances"]:
+                start_frame = int(app["start"] * fps)
+                end_frame = int(app["end"] * fps) + 1  # inclusive
+                bbox = app["bbox"]
+
+                for frame_num in range(max(0, start_frame), min(total_frames, end_frame)):
+                    if frame_num not in frame_map:
+                        frame_map[frame_num] = []
+                    frame_map[frame_num].append(bbox)
+
+        return frame_map
+
+    def process_video_ffmpeg(
+        self,
+        input_path: str,
+        output_path: str,
+        blur_targets: List[Dict],
+        blur_type: BlurType,
+        intensity: int,
+        progress_callback: Optional[Callable[[float], None]] = None
+    ) -> Dict:
+        """
+        Fast video processing using FFmpeg filters directly.
+        Much faster than frame-by-frame processing for BLACKOUT.
+        Falls back to frame-by-frame for complex blur types.
+        """
+        import platform
+
+        # Only use FFmpeg fast path for BLACKOUT
+        if blur_type != BlurType.BLACKOUT:
+            logger.info("[VIDEO] Using frame-by-frame processing for non-BLACKOUT blur")
+            return self.process_video(input_path, output_path, blur_targets, blur_type, intensity, progress_callback)
+
+        logger.info("[VIDEO] Using FFmpeg fast path for BLACKOUT")
+
+        # Build drawbox filter chain
+        filter_parts = []
+        for target in blur_targets:
+            for app in target["appearances"]:
+                x1, y1, x2, y2 = app["bbox"]
+                w = x2 - x1
+                h = y2 - y1
+                start = app["start"]
+                end = app["end"]
+
+                # FFmpeg drawbox with time-based enable
+                filter_parts.append(
+                    f"drawbox=x={x1}:y={y1}:w={w}:h={h}:color=black:t=fill:enable='between(t,{start:.3f},{end:.3f})'"
+                )
+
+        if not filter_parts:
+            # No faces to blur, just copy
+            shutil.copy(input_path, output_path)
+            return {"frames_processed": 0, "blurs_applied": 0, "output_path": output_path}
+
+        # Combine all filters
+        filter_string = ",".join(filter_parts)
+
+        # Check for hardware acceleration
+        use_hw_accel = platform.system() == "Darwin"
+
+        if use_hw_accel:
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-vf", filter_string,
+                "-c:v", "h264_videotoolbox",
+                "-q:v", "65",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                output_path
+            ]
+        else:
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-vf", filter_string,
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "23",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                output_path
+            ]
+
+        logger.info(f"[FFMPEG] Running with {len(filter_parts)} drawbox filters")
+
+        try:
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=1800
+            )
+
+            if result.returncode != 0:
+                logger.error(f"[FFMPEG] Fast path failed: {result.stderr}")
+                logger.info("[FFMPEG] Falling back to frame-by-frame processing")
+                return self.process_video(input_path, output_path, blur_targets, blur_type, intensity, progress_callback)
+
+            logger.info("[FFMPEG] Fast processing complete")
+            return {
+                "frames_processed": 0,  # FFmpeg handles internally
+                "blurs_applied": len(filter_parts),
+                "output_path": output_path
+            }
+
+        except subprocess.TimeoutExpired:
+            logger.error("[FFMPEG] Timeout during fast processing")
+            return self.process_video(input_path, output_path, blur_targets, blur_type, intensity, progress_callback)
+        except Exception as e:
+            logger.error(f"[FFMPEG] Error: {e}")
+            return self.process_video(input_path, output_path, blur_targets, blur_type, intensity, progress_callback)
+
     def process_video(
         self,
         input_path: str,
@@ -415,6 +574,7 @@ class VideoProcessor:
     ) -> Dict:
         """
         Process entire video and apply blur to specified faces.
+        Optimized: only processes frames that contain faces.
 
         Args:
             input_path: Path to input video
@@ -437,7 +597,12 @@ class VideoProcessor:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        logger.info(f"[VIDEO] Processing {total_frames} frames at {width}x{height}, segmentation={self.use_segmentation}")
+        # Pre-compute frame → bboxes map (only frames with faces)
+        frame_bbox_map = self._build_frame_bbox_map(blur_targets, fps, total_frames)
+        frames_with_faces = len(frame_bbox_map)
+
+        logger.info(f"[VIDEO] Processing {total_frames} frames at {width}x{height}")
+        logger.info(f"[VIDEO] Frames with faces: {frames_with_faces} ({frames_with_faces/total_frames*100:.1f}%)")
 
         # Write to temp file first (OpenCV doesn't handle audio)
         temp_video_path = str(output_path) + ".temp_video.mp4"
@@ -456,17 +621,12 @@ class VideoProcessor:
                 if not ret:
                     break
 
-                current_time = frame_idx / fps
+                # Check if this frame has faces (O(1) lookup)
+                bboxes = frame_bbox_map.get(frame_idx)
 
-                # Apply blur for each target face
-                for target in blur_targets:
-                    bbox = self.get_bbox_at_time(
-                        target["appearances"],
-                        current_time,
-                        fps
-                    )
-
-                    if bbox is not None:
+                if bboxes:
+                    # Apply blur for each face in this frame
+                    for bbox in bboxes:
                         frame = self.apply_blur(frame, bbox, blur_type, intensity, frame_id=frame_idx)
                         blurs_applied += 1
 
@@ -477,7 +637,7 @@ class VideoProcessor:
                 out.write(frame)
                 frame_idx += 1
 
-                if progress_callback and frame_idx % 30 == 0:
+                if progress_callback and frame_idx % 100 == 0:
                     progress = (frame_idx / total_frames) * 100
                     progress_callback(progress)
 
@@ -544,8 +704,7 @@ class VideoProcessor:
                     "-i", original_path,
                     "-c:v", "h264_videotoolbox",  # Hardware accelerated H.264
                     "-q:v", "65",                  # Quality (1-100, higher=better)
-                    "-c:a", "aac",
-                    "-b:a", "128k",
+                    "-c:a", "copy",                # Stream copy audio (no re-encode)
                     "-map", "0:v:0",
                     "-map", "1:a:0?",
                     "-movflags", "+faststart",
@@ -553,16 +712,15 @@ class VideoProcessor:
                     output_path
                 ]
             else:
-                # Software encoding with fast preset
+                # Software encoding with ultrafast preset for speed
                 ffmpeg_cmd = [
                     "ffmpeg", "-y",
                     "-i", processed_video_path,
                     "-i", original_path,
                     "-c:v", "libx264",
-                    "-preset", "fast",              # Faster encoding
-                    "-crf", "26",
-                    "-c:a", "aac",
-                    "-b:a", "128k",
+                    "-preset", "ultrafast",         # Fastest encoding
+                    "-crf", "23",                   # Slightly better quality to offset ultrafast
+                    "-c:a", "copy",                 # Stream copy audio (no re-encode)
                     "-map", "0:v:0",
                     "-map", "1:a:0?",
                     "-movflags", "+faststart",

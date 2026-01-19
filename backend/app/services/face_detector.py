@@ -100,18 +100,20 @@ class FaceDetector:
         self,
         video_path: str,
         sample_rate: int = 5,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[callable] = None,
+        skip_detection: bool = False
     ) -> Generator[Dict, None, None]:
         """
-        Process video and yield face detections.
+        Process video and yield frames (optionally with face detections).
 
         Args:
             video_path: Path to the video file
             sample_rate: Process every N frames
             progress_callback: Optional callback for progress updates
+            skip_detection: If True, skip YOLO detection (for use with InsightFace)
 
         Yields:
-            Dict with frame info and detected faces
+            Dict with frame info and optionally detected faces
         """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -137,7 +139,9 @@ class FaceDetector:
                     continue
 
                 timestamp = frame_number / fps
-                faces = self.detect_faces(frame)
+
+                # Skip YOLO detection if using InsightFace for detect+embed
+                faces = [] if skip_detection else self.detect_faces(frame)
 
                 yield {
                     "frame_number": frame_number,

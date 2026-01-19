@@ -126,7 +126,7 @@ def run_blur_processing(process_id: str, analysis_id: str, blur_settings: dict):
             if int(progress) % 20 == 0:
                 logger.info(f"[BG] Processing progress: {progress:.1f}%")
 
-        result = processor.process_video(
+        result = processor.process_video_ffmpeg(
             input_path=video_path,
             output_path=str(output_path),
             blur_targets=blur_targets,

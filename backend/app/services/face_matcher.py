@@ -115,10 +115,12 @@ class FaceMatcher:
                     "bbox": detection["bbox"],
                     "frame_number": detection.get("frame_number", 0)
                 })
-                # Update thumbnail if this detection has better confidence
-                if detection.get("det_score", 0) > matched_cluster.get("best_score", 0):
-                    matched_cluster["thumbnail_frame"] = detection.get("frame")
-                    matched_cluster["best_score"] = detection.get("det_score", 0)
+                # Update thumbnail if this detection has better confidence and has a frame
+                det_score = detection.get("det_score", 0)
+                det_frame = detection.get("frame")
+                if det_score > matched_cluster.get("best_score", 0) and det_frame is not None:
+                    matched_cluster["thumbnail_frame"] = det_frame
+                    matched_cluster["best_score"] = det_score
             else:
                 # Create new cluster
                 cluster_id = f"face-{len(clusters):03d}"
