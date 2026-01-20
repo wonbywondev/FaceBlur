@@ -145,8 +145,29 @@ class FaceParser:
             
             # Crop image
             cropped_image = image[crop_y1:crop_y2, crop_x1:crop_x2]
+            orig_crop_h, orig_crop_w = cropped_image.shape[:2]
+            
+            # ===== MPS COMPATIBILITY: Ensure dimensions are divisible by 3 =====
+            # adaptive_avg_pool2d on MPS requires input sizes divisible by output sizes
+            # We use reflection padding to maintain natural image boundaries
+            pad_h = (3 - orig_crop_h % 3) % 3
+            pad_w = (3 - orig_crop_w % 3) % 3
+            
+            if pad_h > 0 or pad_w > 0:
+                # Add padding using reflection (more natural than zero padding)
+                cropped_image = cv2.copyMakeBorder(
+                    cropped_image, 
+                    0, pad_h,  # top, bottom
+                    0, pad_w,  # left, right
+                    cv2.BORDER_REFLECT
+                )
+                logger.debug(f"[FACE_PARSER] MPS padding: {orig_crop_w}x{orig_crop_h} → {orig_crop_w+pad_w}x{orig_crop_h+pad_h}")
+            
             crop_h, crop_w = cropped_image.shape[:2]
             logger.debug(f"[FACE_PARSER] Cropped: {w}x{h} → {crop_w}x{crop_h} (reduction: {(w*h)/(crop_w*crop_h):.1f}x)")
+            
+            # Verify divisibility (sanity check)
+            assert crop_h % 3 == 0 and crop_w % 3 == 0, f"Crop size not divisible by 3: {crop_w}x{crop_h}"
             
             # Convert cropped image BGR to RGB
             cropped_rgb = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB)
@@ -156,7 +177,7 @@ class FaceParser:
             image_tensor = torch.from_numpy(cropped_rgb).permute(2, 0, 1).unsqueeze(0)
             image_tensor = image_tensor.to(self.device)
 
-            # Adjust bbox coordinates to cropped image space
+            # Adjust bbox coordinates to cropped image space (before padding)
             bbox_in_crop = [x1 - crop_x1, y1 - crop_y1, x2 - crop_x1, y2 - crop_y1]
             rects = torch.tensor([bbox_in_crop], dtype=torch.float32, device=self.device)
             scores = torch.tensor([1.0], dtype=torch.float32, device=self.device)
@@ -165,7 +186,7 @@ class FaceParser:
             # Create 5-point landmarks
             # Priority: Use InsightFace landmarks if available, else approximate from bbox
             if landmarks is not None and isinstance(landmarks, np.ndarray) and landmarks.shape == (5, 2):
-                # Adjust landmarks to cropped image space
+                # Adjust landmarks to cropped image space (before padding)
                 landmarks_in_crop = landmarks.copy()
                 landmarks_in_crop[:, 0] -= crop_x1  # Adjust x
                 landmarks_in_crop[:, 1] -= crop_y1  # Adjust y
@@ -194,8 +215,37 @@ class FaceParser:
                 "image_ids": image_ids,
             }
 
-            # Run face parsing - facer.forward(images, data)
-            result = self.face_parser(image_tensor, data)
+            # ===== Run face parsing with MPS error handling =====
+            try:
+                result = self.face_parser(image_tensor, data)
+            except RuntimeError as e:
+                error_msg = str(e)
+                # Safety net: CPU fallback (should never happen with proper padding)
+                if "adaptive_avg_pool" in error_msg or "MPS" in error_msg:
+                    logger.warning(f"[FACE_PARSER] MPS error despite padding (this should not happen): {e}")
+                    logger.warning("[FACE_PARSER] Falling back to CPU as safety measure")
+                    
+                    # Move tensors to CPU
+                    image_tensor = image_tensor.to('cpu')
+                    data_cpu = {
+                        "rects": rects.to('cpu'),
+                        "points": points.to('cpu'),
+                        "scores": scores.to('cpu'),
+                        "image_ids": image_ids.to('cpu'),
+                    }
+                    
+                    # Temporarily switch parser to CPU
+                    original_device = self.device
+                    self.device = 'cpu'
+                    self.face_parser = self.face_parser.to('cpu')
+                    
+                    result = self.face_parser(image_tensor, data_cpu)
+                    
+                    # Restore original device for next call
+                    self.device = original_device
+                    self.face_parser = self.face_parser.to(original_device)
+                else:
+                    raise  # Re-raise if not MPS-related
 
             if "seg" not in result or "logits" not in result["seg"]:
                 logger.debug("[FACE_PARSER] No segmentation result")
@@ -233,9 +283,14 @@ class FaceParser:
             mask_coverage = (mask_pixels / mask_crop.size) * 100
             logger.debug(f"[FACE_PARSER] Mask before resize: {mask_pixels} pixels ({mask_coverage:.2f}%)")
 
-            # Resize mask to cropped image size if needed
+            # Resize mask to cropped image size (with padding)
             if mask_crop.shape[0] != crop_h or mask_crop.shape[1] != crop_w:
                 mask_crop = cv2.resize(mask_crop, (crop_w, crop_h), interpolation=cv2.INTER_NEAREST)
+            
+            # Remove padding from mask if any was added
+            if pad_h > 0 or pad_w > 0:
+                mask_crop = mask_crop[:orig_crop_h, :orig_crop_w]
+                logger.debug(f"[FACE_PARSER] Removed padding: {crop_w}x{crop_h} → {orig_crop_w}x{orig_crop_h}")
 
             # ===== OPTIMIZATION: Restore mask to full image size =====
             # Create full-size mask and place cropped mask in correct position
