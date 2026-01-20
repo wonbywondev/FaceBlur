@@ -46,18 +46,19 @@ class FaceParser:
             if torch.cuda.is_available():
                 logger.info("[FACE_PARSER] CUDA available, using GPU")
                 return "cuda"
-            elif torch.backends.mps.is_available():
-                # Try MPS (Apple Silicon GPU)
-                # Note: Older PyTorch versions had issues with adaptive_avg_pool2d
-                # but newer versions may work. We'll try and fallback to CPU if needed.
-                logger.info("[FACE_PARSER] MPS available, attempting to use Apple Silicon GPU")
-                return "mps"
+            # MPS disabled: facer library has incomplete MPS support
+            # - grid_sampler creates tensors on CPU while model is on MPS
+            # - Causes device mismatch errors in warp_images()
+            # - CPU performance is still excellent with crop+cache optimizations
+            # elif torch.backends.mps.is_available():
+            #     logger.info("[FACE_PARSER] MPS available, attempting to use Apple Silicon GPU")
+            #     return "mps"
         except ImportError:
             pass
         except Exception as e:
             logger.warning(f"[FACE_PARSER] Error checking GPU availability: {e}")
         
-        logger.info("[FACE_PARSER] Using CPU (no GPU available)")
+        logger.info("[FACE_PARSER] Using CPU (facer library limitation, still fast with optimizations)")
         return "cpu"
 
     def _ensure_model(self) -> bool:
@@ -147,10 +148,11 @@ class FaceParser:
             cropped_image = image[crop_y1:crop_y2, crop_x1:crop_x2]
             orig_crop_h, orig_crop_w = cropped_image.shape[:2]
             
-            # ===== MPS COMPATIBILITY: Ensure dimensions are divisible by 96 =====
-            # adaptive_avg_pool2d on MPS requires ALL feature maps divisible by output size
-            # Backbone downsamples by 32x → need input divisible by (3 × 32) = 96
+            # ===== GPU COMPATIBILITY: Ensure dimensions are divisible by 96 =====
+            # adaptive_avg_pool2d may require feature maps divisible by output size
+            # Backbone downsamples by 32x → input divisible by (3 × 32) = 96 is safest
             # We use reflection padding to maintain natural image boundaries
+            # Note: Required for CUDA, not for CPU but kept for consistency
             REQUIRED_MULTIPLE = 96  # 3 (pool output) × 32 (max downsample factor)
             
             pad_h = (REQUIRED_MULTIPLE - orig_crop_h % REQUIRED_MULTIPLE) % REQUIRED_MULTIPLE
@@ -219,34 +221,10 @@ class FaceParser:
                 "image_ids": image_ids,
             }
 
-            # ===== Run face parsing with MPS error handling =====
-            try:
-                result = self.face_parser(image_tensor, data)
-            except RuntimeError as e:
-                error_msg = str(e)
-                # Safety net: CPU fallback (should never happen with 96-multiple padding)
-                if "adaptive_avg_pool" in error_msg or "MPS" in error_msg or "grid_sampler" in error_msg:
-                    logger.error(f"[FACE_PARSER] ⚠️ MPS error despite 96-multiple padding - this indicates a bug!")
-                    logger.error(f"[FACE_PARSER] Error: {e}")
-                    logger.warning("[FACE_PARSER] Permanently falling back to CPU for all future calls")
-                    
-                    # Permanently switch to CPU (don't retry MPS)
-                    self.device = 'cpu'
-                    self.face_parser = self.face_parser.to('cpu')
-                    
-                    # Move current tensors to CPU
-                    image_tensor = image_tensor.to('cpu')
-                    data_cpu = {
-                        "rects": rects.to('cpu'),
-                        "points": points.to('cpu'),
-                        "scores": scores.to('cpu'),
-                        "image_ids": image_ids.to('cpu'),
-                    }
-                    
-                    # Retry on CPU
-                    result = self.face_parser(image_tensor, data_cpu)
-                else:
-                    raise  # Re-raise if not MPS-related
+            # ===== Run face parsing (MPS disabled, using CPU or CUDA) =====
+            # Note: MPS disabled due to facer library incompatibility
+            # CPU performance is excellent with crop+cache optimizations
+            result = self.face_parser(image_tensor, data)
 
             if "seg" not in result or "logits" not in result["seg"]:
                 logger.debug("[FACE_PARSER] No segmentation result")
