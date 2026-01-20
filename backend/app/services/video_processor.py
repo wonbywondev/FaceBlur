@@ -36,6 +36,7 @@ class VideoProcessor:
         self._cached_frame_id = None
         self._cached_landmarks = None
         self._last_blur_used_segmentation = False
+        self._mask_cache = {}  # Cache for appearance-level masks: (face_id, app_idx) -> mask
 
         # Initialize BiSeNet face parser
         if use_bisenet:
@@ -271,7 +272,10 @@ class VideoProcessor:
         intensity: int = 25,
         mask: Optional[np.ndarray] = None,
         frame_id: int = 0,
-        landmarks: Optional[np.ndarray] = None
+        landmarks: Optional[np.ndarray] = None,
+        face_id: Optional[str] = None,
+        app_idx: Optional[int] = None,
+        is_first_frame: bool = False
     ) -> np.ndarray:
         """
         Apply blur effect to a region of the frame.
@@ -284,6 +288,9 @@ class VideoProcessor:
             mask: Optional face contour mask for precise blur
             frame_id: Frame index for caching MediaPipe results
             landmarks: Optional InsightFace 5-point landmarks (5, 2) array
+            face_id: Face identifier for caching
+            app_idx: Appearance index for caching
+            is_first_frame: True if first frame of this appearance
 
         Returns:
             Frame with blur applied
@@ -297,15 +304,29 @@ class VideoProcessor:
         x2 = max(x1 + 1, min(x2, w))
         y2 = max(y1 + 1, min(y2, h))
 
-        # Try to get face contour mask if segmentation is enabled
+        # ===== OPTIMIZATION: Appearance-level mask caching =====
+        # Only generate mask for first frame of each appearance, reuse for rest
         used_segmentation = False
+        cache_key = (face_id, app_idx) if face_id is not None and app_idx is not None else None
+        
         if mask is None and self.use_segmentation:
-            mask = self._get_face_contour_mask(frame, bbox, frame_id, landmarks=landmarks)
-            if mask is not None:
+            # Check cache first (only for non-first frames)
+            if cache_key and not is_first_frame and cache_key in self._mask_cache:
+                mask = self._mask_cache[cache_key]
                 used_segmentation = True
-                # Logging only at intervals to avoid spam
-                if frame_id % 100 == 0:
-                    logger.info(f"[SEGMENTATION] Frame {frame_id}: contour mask applied")
+                logger.debug(f"[SEGMENTATION] Frame {frame_id}: Using cached mask for {cache_key}")
+            else:
+                # Generate new mask (first frame or cache miss)
+                mask = self._get_face_contour_mask(frame, bbox, frame_id, landmarks=landmarks)
+                if mask is not None:
+                    used_segmentation = True
+                    # Cache the mask for this appearance
+                    if cache_key and is_first_frame:
+                        self._mask_cache[cache_key] = mask
+                        logger.info(f"[SEGMENTATION] Frame {frame_id}: Generated and cached mask for {cache_key}")
+                    # Logging only at intervals to avoid spam
+                    if frame_id % 100 == 0:
+                        logger.info(f"[SEGMENTATION] Frame {frame_id}: contour mask applied")
 
         # If we have a mask, use it for precise blur
         if mask is not None:
@@ -479,12 +500,19 @@ class VideoProcessor:
         Only frames with faces are included in the map.
         
         Returns:
-            Dict mapping frame_num to list of face dicts with 'bbox' and optional 'kps'
+            Dict mapping frame_num to list of face dicts with:
+            - 'bbox': bounding box
+            - 'kps': optional landmarks
+            - 'face_id': face identifier for caching
+            - 'app_idx': appearance index
+            - 'is_first_frame': True if first frame of this appearance
         """
         frame_map = {}
 
         for target in blur_targets:
-            for app in target["appearances"]:
+            face_id = target.get("face_id", target.get("id"))  # Support both formats
+            
+            for app_idx, app in enumerate(target["appearances"]):
                 start_frame = int(app["start"] * fps)
                 end_frame = int(app["end"] * fps) + 1  # inclusive
                 bbox = app["bbox"]
@@ -495,7 +523,10 @@ class VideoProcessor:
                         frame_map[frame_num] = []
                     frame_map[frame_num].append({
                         "bbox": bbox,
-                        "kps": kps
+                        "kps": kps,
+                        "face_id": face_id,
+                        "app_idx": app_idx,
+                        "is_first_frame": (frame_num == start_frame)
                     })
 
         return frame_map
@@ -663,7 +694,18 @@ class VideoProcessor:
                     for face_data in face_data_list:
                         bbox = face_data["bbox"]
                         kps = face_data.get("kps")  # Optional landmarks
-                        frame = self.apply_blur(frame, bbox, blur_type, intensity, frame_id=frame_idx, landmarks=kps)
+                        face_id = face_data.get("face_id")
+                        app_idx = face_data.get("app_idx")
+                        is_first = face_data.get("is_first_frame", False)
+                        
+                        frame = self.apply_blur(
+                            frame, bbox, blur_type, intensity, 
+                            frame_id=frame_idx, 
+                            landmarks=kps,
+                            face_id=face_id,
+                            app_idx=app_idx,
+                            is_first_frame=is_first
+                        )
                         blurs_applied += 1
 
                         # Track segmentation usage

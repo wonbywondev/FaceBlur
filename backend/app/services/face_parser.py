@@ -44,11 +44,20 @@ class FaceParser:
         try:
             import torch
             if torch.cuda.is_available():
+                logger.info("[FACE_PARSER] CUDA available, using GPU")
                 return "cuda"
-            # Note: MPS has issues with adaptive_avg_pool2d in facer model
-            # Fall back to CPU for face parsing on Apple Silicon
+            elif torch.backends.mps.is_available():
+                # Try MPS (Apple Silicon GPU)
+                # Note: Older PyTorch versions had issues with adaptive_avg_pool2d
+                # but newer versions may work. We'll try and fallback to CPU if needed.
+                logger.info("[FACE_PARSER] MPS available, attempting to use Apple Silicon GPU")
+                return "mps"
         except ImportError:
             pass
+        except Exception as e:
+            logger.warning(f"[FACE_PARSER] Error checking GPU availability: {e}")
+        
+        logger.info("[FACE_PARSER] Using CPU (no GPU available)")
         return "cpu"
 
     def _ensure_model(self) -> bool:
@@ -62,10 +71,22 @@ class FaceParser:
             import facer
 
             # Initialize only the face parser (we use existing bbox from detector)
-            self.face_parser = facer.face_parser("farl/lapa/448", device=self.device)
-            self._facer_available = True
-            logger.info(f"[FACE_PARSER] facer face parser loaded on {self.device}")
-            return True
+            try:
+                self.face_parser = facer.face_parser("farl/lapa/448", device=self.device)
+                self._facer_available = True
+                logger.info(f"[FACE_PARSER] facer face parser loaded on {self.device}")
+                return True
+            except RuntimeError as e:
+                # MPS might fail on some operations, fallback to CPU
+                if self.device == "mps" and "mps" in str(e).lower():
+                    logger.warning(f"[FACE_PARSER] MPS failed ({e}), falling back to CPU")
+                    self.device = "cpu"
+                    self.face_parser = facer.face_parser("farl/lapa/448", device=self.device)
+                    self._facer_available = True
+                    logger.info(f"[FACE_PARSER] facer face parser loaded on {self.device}")
+                    return True
+                else:
+                    raise
 
         except ImportError as e:
             self._init_error = f"facer not installed: {e}"
@@ -109,38 +130,60 @@ class FaceParser:
             h, w = image.shape[:2]
             x1, y1, x2, y2 = bbox
 
-            # Convert BGR to RGB
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            # ===== OPTIMIZATION: Crop bbox region with padding =====
+            # This reduces input size by ~10-20x, dramatically improving speed
+            padding_ratio = 0.3  # 30% padding around bbox
+            face_w, face_h = x2 - x1, y2 - y1
+            pad_w = int(face_w * padding_ratio)
+            pad_h = int(face_h * padding_ratio)
+            
+            # Crop coordinates with padding (clamped to image bounds)
+            crop_x1 = max(0, x1 - pad_w)
+            crop_y1 = max(0, y1 - pad_h)
+            crop_x2 = min(w, x2 + pad_w)
+            crop_y2 = min(h, y2 + pad_h)
+            
+            # Crop image
+            cropped_image = image[crop_y1:crop_y2, crop_x1:crop_x2]
+            crop_h, crop_w = cropped_image.shape[:2]
+            logger.debug(f"[FACE_PARSER] Cropped: {w}x{h} → {crop_w}x{crop_h} (reduction: {(w*h)/(crop_w*crop_h):.1f}x)")
+            
+            # Convert cropped image BGR to RGB
+            cropped_rgb = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB)
 
             # Convert to tensor (B, C, H, W) with uint8 values in [0, 255]
             # facer expects: b x 3 x h x w, torch.uint8, [0, 255]
-            image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1).unsqueeze(0)
+            image_tensor = torch.from_numpy(cropped_rgb).permute(2, 0, 1).unsqueeze(0)
             image_tensor = image_tensor.to(self.device)
 
-            # Create data dict with bbox info for facer
-            # facer expects: rects (N, 4), points (N, 5, 2), scores (N,), image_ids (N,)
-            rects = torch.tensor([[x1, y1, x2, y2]], dtype=torch.float32, device=self.device)
+            # Adjust bbox coordinates to cropped image space
+            bbox_in_crop = [x1 - crop_x1, y1 - crop_y1, x2 - crop_x1, y2 - crop_y1]
+            rects = torch.tensor([bbox_in_crop], dtype=torch.float32, device=self.device)
             scores = torch.tensor([1.0], dtype=torch.float32, device=self.device)
             image_ids = torch.tensor([0], dtype=torch.long, device=self.device)
 
             # Create 5-point landmarks
             # Priority: Use InsightFace landmarks if available, else approximate from bbox
             if landmarks is not None and isinstance(landmarks, np.ndarray) and landmarks.shape == (5, 2):
-                # Use accurate InsightFace landmarks
-                # Points order: left_eye, right_eye, nose, left_mouth, right_mouth
-                points = torch.from_numpy(landmarks).unsqueeze(0).float().to(self.device)
+                # Adjust landmarks to cropped image space
+                landmarks_in_crop = landmarks.copy()
+                landmarks_in_crop[:, 0] -= crop_x1  # Adjust x
+                landmarks_in_crop[:, 1] -= crop_y1  # Adjust y
+                points = torch.from_numpy(landmarks_in_crop).unsqueeze(0).float().to(self.device)
                 logger.debug("[FACE_PARSER] Using InsightFace landmarks")
             else:
-                # Fallback: approximate from bbox
+                # Fallback: approximate from bbox (in cropped space)
                 logger.warning("[FACE_PARSER] No landmarks provided, using bbox approximation")
-                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                face_w, face_h = x2 - x1, y2 - y1
+                bbox_cx = (bbox_in_crop[0] + bbox_in_crop[2]) / 2
+                bbox_cy = (bbox_in_crop[1] + bbox_in_crop[3]) / 2
+                bbox_w = bbox_in_crop[2] - bbox_in_crop[0]
+                bbox_h = bbox_in_crop[3] - bbox_in_crop[1]
                 points = torch.tensor([[
-                    [x1 + face_w * 0.3, y1 + face_h * 0.35],  # left eye
-                    [x1 + face_w * 0.7, y1 + face_h * 0.35],  # right eye
-                    [cx, y1 + face_h * 0.55],                  # nose
-                    [x1 + face_w * 0.35, y1 + face_h * 0.75], # left mouth
-                    [x1 + face_w * 0.65, y1 + face_h * 0.75], # right mouth
+                    [bbox_in_crop[0] + bbox_w * 0.3, bbox_in_crop[1] + bbox_h * 0.35],  # left eye
+                    [bbox_in_crop[0] + bbox_w * 0.7, bbox_in_crop[1] + bbox_h * 0.35],  # right eye
+                    [bbox_cx, bbox_in_crop[1] + bbox_h * 0.55],                          # nose
+                    [bbox_in_crop[0] + bbox_w * 0.35, bbox_in_crop[1] + bbox_h * 0.75], # left mouth
+                    [bbox_in_crop[0] + bbox_w * 0.65, bbox_in_crop[1] + bbox_h * 0.75], # right mouth
                 ]], dtype=torch.float32, device=self.device)
 
             # Data dict (without image - image is passed separately)
@@ -181,18 +224,23 @@ class FaceParser:
             logger.debug(f"[FACE_PARSER] Class distribution: {class_dist}")
             
             # Create binary mask from face skin classes
-            mask = np.zeros(face_classes.shape, dtype=np.uint8)
+            mask_crop = np.zeros(face_classes.shape, dtype=np.uint8)
             for class_id in FACE_SKIN_CLASSES:
-                mask[face_classes == class_id] = 255
+                mask_crop[face_classes == class_id] = 255
             
             # Log mask coverage before resize
-            mask_pixels = (mask > 0).sum()
-            mask_coverage = (mask_pixels / mask.size) * 100
+            mask_pixels = (mask_crop > 0).sum()
+            mask_coverage = (mask_pixels / mask_crop.size) * 100
             logger.debug(f"[FACE_PARSER] Mask before resize: {mask_pixels} pixels ({mask_coverage:.2f}%)")
 
-            # Resize mask to original image size if needed
-            if mask.shape[0] != h or mask.shape[1] != w:
-                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            # Resize mask to cropped image size if needed
+            if mask_crop.shape[0] != crop_h or mask_crop.shape[1] != crop_w:
+                mask_crop = cv2.resize(mask_crop, (crop_w, crop_h), interpolation=cv2.INTER_NEAREST)
+
+            # ===== OPTIMIZATION: Restore mask to full image size =====
+            # Create full-size mask and place cropped mask in correct position
+            mask = np.zeros((h, w), dtype=np.uint8)
+            mask[crop_y1:crop_y2, crop_x1:crop_x2] = mask_crop
 
             # Smooth edges for natural blending
             mask = cv2.GaussianBlur(mask, (15, 15), 0)
