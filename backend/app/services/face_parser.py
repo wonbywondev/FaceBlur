@@ -147,11 +147,14 @@ class FaceParser:
             cropped_image = image[crop_y1:crop_y2, crop_x1:crop_x2]
             orig_crop_h, orig_crop_w = cropped_image.shape[:2]
             
-            # ===== MPS COMPATIBILITY: Ensure dimensions are divisible by 3 =====
-            # adaptive_avg_pool2d on MPS requires input sizes divisible by output sizes
+            # ===== MPS COMPATIBILITY: Ensure dimensions are divisible by 96 =====
+            # adaptive_avg_pool2d on MPS requires ALL feature maps divisible by output size
+            # Backbone downsamples by 32x → need input divisible by (3 × 32) = 96
             # We use reflection padding to maintain natural image boundaries
-            pad_h = (3 - orig_crop_h % 3) % 3
-            pad_w = (3 - orig_crop_w % 3) % 3
+            REQUIRED_MULTIPLE = 96  # 3 (pool output) × 32 (max downsample factor)
+            
+            pad_h = (REQUIRED_MULTIPLE - orig_crop_h % REQUIRED_MULTIPLE) % REQUIRED_MULTIPLE
+            pad_w = (REQUIRED_MULTIPLE - orig_crop_w % REQUIRED_MULTIPLE) % REQUIRED_MULTIPLE
             
             if pad_h > 0 or pad_w > 0:
                 # Add padding using reflection (more natural than zero padding)
@@ -167,7 +170,8 @@ class FaceParser:
             logger.debug(f"[FACE_PARSER] Cropped: {w}x{h} → {crop_w}x{crop_h} (reduction: {(w*h)/(crop_w*crop_h):.1f}x)")
             
             # Verify divisibility (sanity check)
-            assert crop_h % 3 == 0 and crop_w % 3 == 0, f"Crop size not divisible by 3: {crop_w}x{crop_h}"
+            assert crop_h % REQUIRED_MULTIPLE == 0 and crop_w % REQUIRED_MULTIPLE == 0, \
+                f"Crop size not divisible by {REQUIRED_MULTIPLE}: {crop_w}x{crop_h}"
             
             # Convert cropped image BGR to RGB
             cropped_rgb = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB)
@@ -220,12 +224,17 @@ class FaceParser:
                 result = self.face_parser(image_tensor, data)
             except RuntimeError as e:
                 error_msg = str(e)
-                # Safety net: CPU fallback (should never happen with proper padding)
-                if "adaptive_avg_pool" in error_msg or "MPS" in error_msg:
-                    logger.warning(f"[FACE_PARSER] MPS error despite padding (this should not happen): {e}")
-                    logger.warning("[FACE_PARSER] Falling back to CPU as safety measure")
+                # Safety net: CPU fallback (should never happen with 96-multiple padding)
+                if "adaptive_avg_pool" in error_msg or "MPS" in error_msg or "grid_sampler" in error_msg:
+                    logger.error(f"[FACE_PARSER] ⚠️ MPS error despite 96-multiple padding - this indicates a bug!")
+                    logger.error(f"[FACE_PARSER] Error: {e}")
+                    logger.warning("[FACE_PARSER] Permanently falling back to CPU for all future calls")
                     
-                    # Move tensors to CPU
+                    # Permanently switch to CPU (don't retry MPS)
+                    self.device = 'cpu'
+                    self.face_parser = self.face_parser.to('cpu')
+                    
+                    # Move current tensors to CPU
                     image_tensor = image_tensor.to('cpu')
                     data_cpu = {
                         "rects": rects.to('cpu'),
@@ -234,16 +243,8 @@ class FaceParser:
                         "image_ids": image_ids.to('cpu'),
                     }
                     
-                    # Temporarily switch parser to CPU
-                    original_device = self.device
-                    self.device = 'cpu'
-                    self.face_parser = self.face_parser.to('cpu')
-                    
+                    # Retry on CPU
                     result = self.face_parser(image_tensor, data_cpu)
-                    
-                    # Restore original device for next call
-                    self.device = original_device
-                    self.face_parser = self.face_parser.to(original_device)
                 else:
                     raise  # Re-raise if not MPS-related
 
