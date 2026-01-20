@@ -95,7 +95,8 @@ def run_analysis(analysis_id: str, session_id: str, expected_persons: str = "10"
                     "timestamp": timestamp,
                     "frame_number": frame_number,
                     "frame": frame.copy() if store_frame else None,
-                    "det_score": face["det_score"]
+                    "det_score": face["det_score"],
+                    "kps": face.get("kps")
                 })
 
             analyses[analysis_id]["faces_detected"] = len(all_detections)

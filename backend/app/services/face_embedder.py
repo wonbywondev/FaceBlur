@@ -122,7 +122,8 @@ class FaceEmbedder:
                 results.append({
                     "bbox": bbox,
                     "embedding": embedding,
-                    "det_score": float(face.det_score)
+                    "det_score": float(face.det_score),
+                    "kps": face.kps.copy() if hasattr(face, 'kps') else None
                 })
 
             return results

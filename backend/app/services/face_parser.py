@@ -81,6 +81,7 @@ class FaceParser:
         self,
         image: np.ndarray,
         bbox: Optional[List[int]] = None,
+        landmarks: Optional[np.ndarray] = None
     ) -> Optional[np.ndarray]:
         """
         Parse face and return segmentation mask.
@@ -88,17 +89,21 @@ class FaceParser:
         Args:
             image: Input image (BGR)
             bbox: Bounding box [x1, y1, x2, y2] for the face
+            landmarks: Optional InsightFace 5-point landmarks (5, 2) array
 
         Returns:
             Binary mask of face region (0-255), or None if parsing failed
         """
         if not self._ensure_model():
+            logger.debug("[FACE_PARSER] Model not available")
             return None
 
         if bbox is None:
+            logger.debug("[FACE_PARSER] No bbox provided")
             return None
 
         try:
+            logger.debug(f"[FACE_PARSER] Parsing face at bbox {bbox}")
             import torch
 
             h, w = image.shape[:2]
@@ -118,17 +123,25 @@ class FaceParser:
             scores = torch.tensor([1.0], dtype=torch.float32, device=self.device)
             image_ids = torch.tensor([0], dtype=torch.long, device=self.device)
 
-            # Create 5-point landmarks (approximate from bbox)
-            # Points order: left_eye, right_eye, nose, left_mouth, right_mouth
-            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-            face_w, face_h = x2 - x1, y2 - y1
-            points = torch.tensor([[
-                [x1 + face_w * 0.3, y1 + face_h * 0.35],  # left eye
-                [x1 + face_w * 0.7, y1 + face_h * 0.35],  # right eye
-                [cx, y1 + face_h * 0.55],                  # nose
-                [x1 + face_w * 0.35, y1 + face_h * 0.75], # left mouth
-                [x1 + face_w * 0.65, y1 + face_h * 0.75], # right mouth
-            ]], dtype=torch.float32, device=self.device)
+            # Create 5-point landmarks
+            # Priority: Use InsightFace landmarks if available, else approximate from bbox
+            if landmarks is not None and isinstance(landmarks, np.ndarray) and landmarks.shape == (5, 2):
+                # Use accurate InsightFace landmarks
+                # Points order: left_eye, right_eye, nose, left_mouth, right_mouth
+                points = torch.from_numpy(landmarks).unsqueeze(0).float().to(self.device)
+                logger.debug("[FACE_PARSER] Using InsightFace landmarks")
+            else:
+                # Fallback: approximate from bbox
+                logger.warning("[FACE_PARSER] No landmarks provided, using bbox approximation")
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                face_w, face_h = x2 - x1, y2 - y1
+                points = torch.tensor([[
+                    [x1 + face_w * 0.3, y1 + face_h * 0.35],  # left eye
+                    [x1 + face_w * 0.7, y1 + face_h * 0.35],  # right eye
+                    [cx, y1 + face_h * 0.55],                  # nose
+                    [x1 + face_w * 0.35, y1 + face_h * 0.75], # left mouth
+                    [x1 + face_w * 0.65, y1 + face_h * 0.75], # right mouth
+                ]], dtype=torch.float32, device=self.device)
 
             # Data dict (without image - image is passed separately)
             data = {
@@ -146,16 +159,36 @@ class FaceParser:
                 return None
 
             # Get segmentation logits and convert to class predictions
-            seg_logits = result["seg"]["logits"]  # (B, num_faces, C, H, W)
+            seg_logits = result["seg"]["logits"]  # Actual: (B, C, H, W)
+            
+            # Shape validation and logging
+            logger.debug(f"[FACE_PARSER] seg_logits shape: {seg_logits.shape}")
+            
+            if seg_logits.dim() != 4:
+                logger.error(f"[FACE_PARSER] Unexpected dim: {seg_logits.dim()}, expected 4")
+                return None
+            
+            batch_size, num_classes, height, width = seg_logits.shape
+            logger.debug(f"[FACE_PARSER] Parsed: B={batch_size}, C={num_classes}, H={height}, W={width}")
 
-            # Get the first face's segmentation
-            face_seg = seg_logits[0, 0]  # (C, H, W)
+            # Get the first batch's segmentation (correct indexing for (B, C, H, W))
+            face_seg = seg_logits[0]  # (C, H, W)
             face_classes = face_seg.argmax(dim=0).cpu().numpy()  # (H, W)
 
+            # Log class distribution
+            unique_classes, counts = np.unique(face_classes, return_counts=True)
+            class_dist = dict(zip(unique_classes.tolist(), counts.tolist()))
+            logger.debug(f"[FACE_PARSER] Class distribution: {class_dist}")
+            
             # Create binary mask from face skin classes
             mask = np.zeros(face_classes.shape, dtype=np.uint8)
             for class_id in FACE_SKIN_CLASSES:
                 mask[face_classes == class_id] = 255
+            
+            # Log mask coverage before resize
+            mask_pixels = (mask > 0).sum()
+            mask_coverage = (mask_pixels / mask.size) * 100
+            logger.debug(f"[FACE_PARSER] Mask before resize: {mask_pixels} pixels ({mask_coverage:.2f}%)")
 
             # Resize mask to original image size if needed
             if mask.shape[0] != h or mask.shape[1] != w:
@@ -168,10 +201,11 @@ class FaceParser:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
+            logger.debug(f"[FACE_PARSER] Successfully created mask, non-zero pixels: {mask.sum() / 255:.0f}")
             return mask
 
         except Exception as e:
-            logger.error(f"[FACE_PARSER] Face parsing failed: {e}")
+            logger.error(f"[FACE_PARSER] Face parsing failed: {e}", exc_info=True)
             return None
 
     def is_available(self) -> bool:

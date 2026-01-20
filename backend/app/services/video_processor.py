@@ -28,6 +28,7 @@ class BlurType(str, Enum):
 
 class VideoProcessor:
     def __init__(self, use_segmentation: bool = True, use_bisenet: bool = True):
+        logger.info(f"[VIDEO_PROCESSOR] Initializing with use_segmentation={use_segmentation}, use_bisenet={use_bisenet}")
         self.use_segmentation = use_segmentation
         self.use_bisenet = use_bisenet
         self._face_mesh = None
@@ -38,11 +39,17 @@ class VideoProcessor:
 
         # Initialize BiSeNet face parser
         if use_bisenet:
+            logger.info("[VIDEO_PROCESSOR] Attempting to load BiSeNet face parser...")
             self._face_parser = get_face_parser()
-            if self._face_parser.is_available():
-                logger.info("[SEGMENTATION] BiSeNet face parser available")
+            is_available = self._face_parser.is_available()
+            logger.info(f"[VIDEO_PROCESSOR] BiSeNet parser object: {self._face_parser}")
+            logger.info(f"[VIDEO_PROCESSOR] BiSeNet is_available: {is_available}")
+            if is_available:
+                logger.info("[SEGMENTATION] ✓ BiSeNet face parser available and ready")
             else:
-                logger.info("[SEGMENTATION] BiSeNet not available, will use fallback")
+                logger.warning("[SEGMENTATION] ✗ BiSeNet not available, will use fallback")
+        else:
+            logger.info("[VIDEO_PROCESSOR] BiSeNet disabled, skipping initialization")
 
     def _get_face_mesh(self):
         """Lazy load MediaPipe Face Mesh (if available)."""
@@ -128,7 +135,8 @@ class VideoProcessor:
         self,
         frame: np.ndarray,
         bbox: List[int],
-        frame_id: int = 0
+        frame_id: int = 0,
+        landmarks: Optional[np.ndarray] = None
     ) -> Optional[np.ndarray]:
         """
         Get face contour mask for precise blur application.
@@ -142,36 +150,54 @@ class VideoProcessor:
             frame: Input frame (BGR)
             bbox: Face bounding box [x1, y1, x2, y2]
             frame_id: Frame index for caching
+            landmarks: Optional InsightFace 5-point landmarks (5, 2) array
 
         Returns:
             Binary mask of face contour, or None if detection failed
         """
         if not self.use_segmentation:
+            logger.debug("[SEGMENTATION] Segmentation disabled, returning None")
             return None
 
         # Priority 1: Try BiSeNet face parsing (most precise)
+        logger.debug(f"[SEGMENTATION] Frame {frame_id}: use_bisenet={self.use_bisenet}, _face_parser={self._face_parser is not None}")
         if self.use_bisenet and self._face_parser is not None:
-            bisenet_mask = self._face_parser.parse_face(frame, bbox)
+            logger.debug(f"[SEGMENTATION] Frame {frame_id}: Calling BiSeNet parse_face with bbox={bbox}, landmarks={'provided' if landmarks is not None else 'None'}")
+            bisenet_mask = self._face_parser.parse_face(frame, bbox, landmarks=landmarks)
+            logger.debug(f"[SEGMENTATION] Frame {frame_id}: BiSeNet returned mask={bisenet_mask is not None}")
             if bisenet_mask is not None:
                 # Verify mask has content in the bbox region
                 x1, y1, x2, y2 = bbox
                 roi_mask = bisenet_mask[y1:y2, x1:x2]
-                if roi_mask.sum() > 0:
+                roi_sum = roi_mask.sum()
+                logger.debug(f"[SEGMENTATION] Frame {frame_id}: BiSeNet mask ROI sum={roi_sum}")
+                if roi_sum > 0:
                     if frame_id % 100 == 0:
-                        logger.info(f"[SEGMENTATION] Frame {frame_id}: BiSeNet mask applied")
+                        logger.info(f"[SEGMENTATION] Frame {frame_id}: ✓ BiSeNet mask applied (ROI sum={roi_sum})")
                     return bisenet_mask
                 else:
-                    logger.debug(f"[SEGMENTATION] Frame {frame_id}: BiSeNet mask empty, trying fallback")
+                    logger.warning(f"[SEGMENTATION] Frame {frame_id}: ✗ BiSeNet mask empty, trying fallback")
+            else:
+                logger.warning(f"[SEGMENTATION] Frame {frame_id}: ✗ BiSeNet returned None, trying fallback")
+        else:
+            if not self.use_bisenet:
+                logger.debug(f"[SEGMENTATION] Frame {frame_id}: BiSeNet disabled (use_bisenet=False)")
+            elif self._face_parser is None:
+                logger.warning(f"[SEGMENTATION] Frame {frame_id}: ✗ BiSeNet parser is None, trying fallback")
 
         # Priority 2: Try MediaPipe Face Mesh
+        logger.debug(f"[SEGMENTATION] Frame {frame_id}: Trying MediaPipe Face Mesh...")
         landmarks_result = self._get_frame_landmarks(frame, frame_id)
+        logger.debug(f"[SEGMENTATION] Frame {frame_id}: MediaPipe landmarks_result={landmarks_result if isinstance(landmarks_result, str) else ('None' if landmarks_result is None else 'landmarks')}")
 
         if landmarks_result == "ellipse":
             # MediaPipe not available, use ellipse
+            logger.info(f"[SEGMENTATION] Frame {frame_id}: MediaPipe not available, using ellipse fallback")
             return self._create_ellipse_mask(frame, bbox)
 
         if landmarks_result is None:
             # MediaPipe didn't find any faces, use ellipse fallback
+            logger.warning(f"[SEGMENTATION] Frame {frame_id}: MediaPipe found no faces, using ellipse fallback")
             return self._create_ellipse_mask(frame, bbox)
 
         # MediaPipe landmarks available - find matching face
@@ -212,9 +238,11 @@ class VideoProcessor:
 
         if best_landmarks is None:
             # No matching MediaPipe face, use ellipse
+            logger.warning(f"[SEGMENTATION] Frame {frame_id}: MediaPipe found no matching face, using ellipse fallback")
             return self._create_ellipse_mask(frame, bbox)
 
         # Extract face oval points in full frame coordinates
+        logger.debug(f"[SEGMENTATION] Frame {frame_id}: MediaPipe found matching face, creating convex hull mask")
         points = []
         for idx in FACE_OVAL_INDICES:
             lm = best_landmarks.landmark[idx]
@@ -231,6 +259,8 @@ class VideoProcessor:
         # Smooth the mask edges for natural blending
         mask = cv2.GaussianBlur(mask, (21, 21), 0)
 
+        if frame_id % 100 == 0:
+            logger.info(f"[SEGMENTATION] Frame {frame_id}: ✓ MediaPipe convex hull mask applied")
         return mask
 
     def apply_blur(
@@ -240,7 +270,8 @@ class VideoProcessor:
         blur_type: BlurType,
         intensity: int = 25,
         mask: Optional[np.ndarray] = None,
-        frame_id: int = 0
+        frame_id: int = 0,
+        landmarks: Optional[np.ndarray] = None
     ) -> np.ndarray:
         """
         Apply blur effect to a region of the frame.
@@ -252,6 +283,7 @@ class VideoProcessor:
             intensity: Blur intensity (1-50)
             mask: Optional face contour mask for precise blur
             frame_id: Frame index for caching MediaPipe results
+            landmarks: Optional InsightFace 5-point landmarks (5, 2) array
 
         Returns:
             Frame with blur applied
@@ -268,7 +300,7 @@ class VideoProcessor:
         # Try to get face contour mask if segmentation is enabled
         used_segmentation = False
         if mask is None and self.use_segmentation:
-            mask = self._get_face_contour_mask(frame, bbox, frame_id)
+            mask = self._get_face_contour_mask(frame, bbox, frame_id, landmarks=landmarks)
             if mask is not None:
                 used_segmentation = True
                 # Logging only at intervals to avoid spam
@@ -441,10 +473,13 @@ class VideoProcessor:
         blur_targets: List[Dict],
         fps: float,
         total_frames: int
-    ) -> Dict[int, List[List[int]]]:
+    ) -> Dict[int, List[Dict]]:
         """
-        Pre-compute frame → bboxes mapping for fast lookup.
+        Pre-compute frame → face data mapping for fast lookup.
         Only frames with faces are included in the map.
+        
+        Returns:
+            Dict mapping frame_num to list of face dicts with 'bbox' and optional 'kps'
         """
         frame_map = {}
 
@@ -453,11 +488,15 @@ class VideoProcessor:
                 start_frame = int(app["start"] * fps)
                 end_frame = int(app["end"] * fps) + 1  # inclusive
                 bbox = app["bbox"]
+                kps = app.get("kps")  # Optional landmarks from InsightFace
 
                 for frame_num in range(max(0, start_frame), min(total_frames, end_frame)):
                     if frame_num not in frame_map:
                         frame_map[frame_num] = []
-                    frame_map[frame_num].append(bbox)
+                    frame_map[frame_num].append({
+                        "bbox": bbox,
+                        "kps": kps
+                    })
 
         return frame_map
 
@@ -472,17 +511,12 @@ class VideoProcessor:
     ) -> Dict:
         """
         Fast video processing using FFmpeg filters directly.
-        Much faster than frame-by-frame processing for BLACKOUT.
-        Falls back to frame-by-frame for complex blur types.
+        Currently disabled to support face contour segmentation for all blur types.
+        Falls back to frame-by-frame processing with precise segmentation.
         """
-        import platform
-
-        # Only use FFmpeg fast path for BLACKOUT
-        if blur_type != BlurType.BLACKOUT:
-            logger.info("[VIDEO] Using frame-by-frame processing for non-BLACKOUT blur")
-            return self.process_video(input_path, output_path, blur_targets, blur_type, intensity, progress_callback)
-
-        logger.info("[VIDEO] Using FFmpeg fast path for BLACKOUT")
+        # Always use frame-by-frame processing for precise face contour segmentation
+        logger.info("[VIDEO] Using frame-by-frame processing with segmentation")
+        return self.process_video(input_path, output_path, blur_targets, blur_type, intensity, progress_callback)
 
         # Build drawbox filter chain
         filter_parts = []
@@ -622,12 +656,14 @@ class VideoProcessor:
                     break
 
                 # Check if this frame has faces (O(1) lookup)
-                bboxes = frame_bbox_map.get(frame_idx)
+                face_data_list = frame_bbox_map.get(frame_idx)
 
-                if bboxes:
+                if face_data_list:
                     # Apply blur for each face in this frame
-                    for bbox in bboxes:
-                        frame = self.apply_blur(frame, bbox, blur_type, intensity, frame_id=frame_idx)
+                    for face_data in face_data_list:
+                        bbox = face_data["bbox"]
+                        kps = face_data.get("kps")  # Optional landmarks
+                        frame = self.apply_blur(frame, bbox, blur_type, intensity, frame_id=frame_idx, landmarks=kps)
                         blurs_applied += 1
 
                         # Track segmentation usage
